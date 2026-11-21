@@ -7,8 +7,8 @@ after `v2.69.2`); re-check them before editing.
 
 ## Order of operations
 
-1. Publish this repository and validate the provider on the Windows box with the
-   hardware (`README.md`, "What has and has not been verified").
+1. Validate the provider on the Windows box with the hardware
+   (`docs/windows-validation.md`). The repository is published; nothing is released.
 2. Cut the first provider release, pinned to a runtime tag `T` that **still** carries
    the in-tree sources. Nothing in this build uses the trunk's `drivers/ultraleap/`
    directory, so the pin can move past the removal later without any change here.
@@ -16,7 +16,9 @@ after `v2.69.2`); re-check them before editing.
    `downstream-pins.json` track, catalog component, release-skill row. Safe to merge
    before the removal.
 4. Runtime PR B — *the removal* (section A). It ships in the next runtime release.
-5. Repin this repository to that release and release again (the exact-pin rule).
+5. Re-run the range check against that release: if its shared headers are identical
+   to the pin's, raise `verified_max`; otherwise repin, rebuild and release
+   (`docs/trunk-dependencies.md`, section 7).
 
 Do not merge B before a provider release exists: between the two, a from-source
 Windows box with the SDK would lose hands with nothing to install.
@@ -27,8 +29,8 @@ Windows box with the SDK would lose hands with nothing to install.
 
 | Path | Note |
 |---|---|
-| `src/xrt/drivers/ultraleap/` (5 files) | Now `src/ultraleap/` here, byte-identical at `v2.69.3`. |
-| `tests/tests_ultraleap_map.cpp` | Now `tests/tests_ultraleap_map.cpp` here (runs in this repo's CI without the SDK). |
+| `src/xrt/drivers/ultraleap/` (5 files) | Imported here at `v2.69.3` (commit `ff55b02`, byte-identical), then **forked**: this repository binds LeapC at run time, turned the two `getenv` knobs into settings, and owns the layer-advice text. The trunk copy is the old design; do not port changes back, delete it. |
+| `tests/tests_ultraleap_map.cpp` | Lives here, extended for the new settings (runs in this repo's CI without the SDK). |
 
 ### A2. Build system
 
@@ -80,15 +82,17 @@ with `--check`, which **fails when a name in the catalog no longer occurs in
 In the removal PR: delete the census row, re-run `scripts/gen_lever_catalog.py`, and
 fix the lever totals wherever they are quoted (the generated header's "82 levers"
 line updates itself; check the census's own totals and the runtime `CLAUDE.md`
-documentation index). The variable still exists — in this repository — and should
-become a declared provider setting (`docs/trunk-dependencies.md`, section 5).
+documentation index). In this repository the knob is the declared setting
+`SETTLE_MS` (read through `host->get_setting`, so it shows up in
+`displayxr-cli input options ultraleap`); it no longer belongs in a census of
+environment variables at all.
 
 ### A7. What must NOT be removed
 
 | Path | Why it stays |
 |---|---|
-| `src/xrt/auxiliary/util/u_openxr_layers.{h,c}` | This provider still calls `u_openxr_implicit_layer_find` and `u_openxr_layer_ultraleap_advice` from the pinned runtime tree, and `displayxr-cli` shares the advice text. Moving the Ultraleap-specific half here and making the CLI warning data-driven is a separate change (`docs/trunk-dependencies.md`, section 6). |
-| `src/xrt/targets/cli/cli_query.{c,h}` — `check_ultraleap_layer`, `input_ultraleap_layer_*`, the `ULTRALEAP_OPENXR_LAYER` warning | Same reason; it matches a registered provider by the string `ultraleap`, which still works for the out-of-tree row. |
+| `src/xrt/auxiliary/util/u_openxr_layers.{h,c}` | This provider still compiles the **generic** lookup (`u_openxr_implicit_layer_find`, `struct u_openxr_implicit_layer`) from the pinned runtime tree. The Ultraleap-specific half (`U_OPENXR_LAYER_ULTRALEAP_*`, `u_openxr_layer_ultraleap_advice`) has been forked here (`ultraleap_layer.{h,c}`) and is no longer used by the provider — but `displayxr-cli` still uses it. **Follow-up (separate from the removal):** make the CLI warning data-driven (`docs/trunk-dependencies.md`, section 6), then delete those constants and that function from the trunk and the matching cases in `tests/tests_openxr_layers.cpp`. Until then the advice text exists in two places. |
+| `src/xrt/targets/cli/cli_query.{c,h}` — `check_ultraleap_layer`, `input_ultraleap_layer_*`, the `ULTRALEAP_OPENXR_LAYER` warning | Stays until the follow-up above; it matches a registered provider by the string `ultraleap`, which still works for the out-of-tree row. |
 | `build-windows.yml` vendor-identifier guard | Section A3. |
 | `src/xrt/drivers/input_plugin_exports.version` | Shared by the remaining providers. |
 | The comments in `target_input_plugin_loader.c:353`, `target_input_arbiter.{c,h}`, `net_input_hub.c:502`, `xrt_tracking.h:66`, `sim_input_*` | They use the provider as an example or cite its mapping gain. Optional rewording; no behaviour. |
@@ -124,8 +128,9 @@ the older `InputProviders\DisplayXR-Ultraleap`) whose `Binary` is under
 `ultraleap` row. It does not delete a `DisplayXR-Ultraleap` row or the old files. The
 release notes of the runtime version that carries the removal should say: delete
 `InputProviders\DisplayXR-Ultraleap` if present, delete
-`Runtime\plugins\DisplayXR-Ultraleap.dll` and the `LeapC.dll` beside it, then install
-this component.
+`Runtime\plugins\DisplayXR-Ultraleap.dll` and the `LeapC.dll` beside it (the in-tree
+build staged one; this component never does), then install this component. The two
+old environment variables keep working for one release of this component.
 
 ## B. Additions — runtime-repo entries for the new component
 
@@ -143,9 +148,9 @@ it needs third-party software and a camera. Follow-ups that come with a new fiel
   `DisplayXRUltraleapSetup-*.exe`, marker
   `HKLM\Software\DisplayXR\Plugins\Ultraleap\Version`, opt-in).
 - `.github/workflows/versions-bump.yml`: the default tag shape (`vX.Y.Z`) already
-  fits. Add a gate for this field: refuse the bump when the provider tag's
-  `DXR_RUNTIME_GIT_TAG` is not the runtime version `versions.json` then pins, since
-  the pair must match exactly. Then set this repository's variable
+  fits. Add a gate for this field: refuse the bump when the runtime version
+  `versions.json` pins is outside the provider tag's `runtime_range`
+  (`catalog/ultraleap-hands.json` at that tag). Then set this repository's variable
   `DXR_VERSIONS_BUMP=true` (the `bump` job in `release.yml` is gated on it).
 - `displayxr-installer` mirrors the file byte for byte; the bundle does not enrol a
   new field by itself (`build-bundle` reads its pins by name), which is the right
@@ -160,7 +165,7 @@ it needs third-party software and a camera. Follow-ups that come with a new fiel
   "tracks": {
     "all": {
       "bump_when": "features",
-      "reason": "The provider returns raw struct xrt_device (ADR-063): a binary is only known-good on the runtime release it was built at, so the catalog pins an exact runtime range and a repin is a new provider release. No existing policy matches that exactly. 'abi' never fires (input ABI is 1 and stays 1). 'features' over the device headers catches an added or re-signed function-pointer slot and feature-macro changes, but is BLIND to a plain field added to xrt_device and to an enumerator inserted in xrt_device_name / xrt_device_type / xrt_tracking_type - the changes ADR-063 is about. Until a 'layout' policy exists (byte-diff of the shared-header closure; this repo's scripts/runtime_range.py is a working sketch), treat a skipped release as 'not proven safe', not 'safe'.",
+      "reason": "The provider returns raw struct xrt_device (ADR-063): a binary is valid on the runtime releases whose shared headers are byte-identical to its build pin, and the repo's catalog entry records that range. So a runtime release needs ONE of two things from this repo: nothing but a raised verified_max (headers identical), or a repin + rebuild + release (headers changed). No existing policy expresses that. 'abi' never fires (input ABI is 1 and stays 1). 'features' over the device headers is the nearest: it repins on an added or re-signed function-pointer slot and on feature-macro changes, but is BLIND to a plain field added to xrt_device and to an enumerator inserted in xrt_device_name / xrt_device_type / xrt_tracking_type. The repo's own weekly runtime-range workflow covers that blind spot today; the right fix is a 'layout' policy here that runs the same byte-diff (scripts/runtime_range.py in that repo) and opens the repin PR only when the shared headers changed.",
       "feature_headers": [
         "src/xrt/include/xrt/xrt_input_plugin.h",
         "src/xrt/include/xrt/xrt_component_settings.h",
@@ -181,12 +186,14 @@ it needs third-party software and a camera. Follow-ups that come with a new fiel
 Three things to settle with it:
 
 - **The catalog file carries the pin too** (`catalog/ultraleap-hands.json`:
-  `requires.runtime`, `runtime_range.min`, `runtime_range.max`), and this repository's
-  `pin` job fails when they differ from the CMake pin. Neither existing location kind
-  (`cmake_set`, `yaml_env`) can rewrite JSON, so an automatic repin PR would be red
-  until edited by hand. Preferred fix: the catalog generator derives the range from
-  the CMake pin at the provider's tag (the way the Leia installer's
-  `MIN_RUNTIME_VERSION` is derived, never listed) and the hand-written copy goes away.
+  `runtime_range.build`), and this repository's `lint` job fails when it differs from
+  the CMake pin. Neither existing location kind (`cmake_set`, `yaml_env`) can rewrite
+  JSON, so an automatic repin PR would be red until `build`, `min` and `verified_max`
+  are re-derived (a repin starts a new range). Preferred fix: a repin PR runs
+  `runtime_range.py --suggest` and writes the three values; or the catalog generator
+  derives them at the provider's tag and the hand-written copy goes away.
+- **The workflows list.** `RUNTIME_REF` appears in `build.yml`, `release.yml` and
+  `runtime-range.yml`; add the third to `locations`.
 - **`feature_surface.headers`** is the default set for `features` tracks and is all
   display-processor headers; this track sets its own list, so no change there.
 - **`scripts/check_plugin_abi.py`** already knows `xrt_input_plugin.h` in
@@ -203,11 +210,13 @@ Three things to settle with it:
   signature is valid with a listed signer. **An unsigned provider release is therefore
   "not fetchable"**: the signing lane is a prerequisite for catalog presence, not a
   nicety.
-- Schema 1 cannot express a maximum runtime, an external prerequisite or a note
-  (`docs/specs/runtime/component-catalog.md`). A schema-1 client would read
-  `requires.runtime: ">=2.69.3"` as a floor and offer the provider on every later
-  runtime. Publishing this entry needs the schema that adds `runtime_range` and
-  `prerequisites`, and a `dxr-get` that honours them.
+- Schema 1 cannot express a verified maximum, an external prerequisite or a note
+  (`docs/specs/runtime/component-catalog.md`). A schema-1 client reads
+  `requires.runtime: ">=2.68.0"` as a floor and would offer the provider on every
+  later runtime, verified or not. Publishing this entry properly needs the schema that
+  adds `runtime_range` and `prerequisites`, and a `dxr-get` that honours them. The
+  generator can own `verified_max`: it has the runtime's tags and can run the same
+  header diff at publish time, which removes the weekly manual step.
 
 ### B4. Release tooling and other surfaces
 
@@ -218,3 +227,15 @@ Three things to settle with it:
 - `displayxr-website`: the components page.
 - `docs/guides/input-provider-onboarding.md` "Where to start": add this repository as
   the real-hardware, aux-linking example beside `displayxr-input-template`.
+
+### B5. Runtime changes this provider would benefit from (none required)
+
+- **A platform-state slot on the input iface** (the display-processor iface has
+  `get_platform_state`). Today "Ultraleap tracking software not installed" can only
+  reach the runtime as presence `ABSENT`, indistinguishable from "camera unplugged";
+  a slot would let `displayxr-cli` and the dashboard say which.
+- **ADR-063** — step 1 (the layout fingerprint the loader checks) makes a provider
+  outside its range a logged refusal instead of undefined behaviour; step 2 removes
+  the range.
+- **A `log` slot on the host iface**, so a provider need not import `u_log` from the
+  runtime DLL (`docs/trunk-dependencies.md`, section 4).

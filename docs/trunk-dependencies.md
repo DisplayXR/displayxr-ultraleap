@@ -4,14 +4,12 @@ Audit of every runtime header and aux symbol the provider uses beyond the public
 input-provider contract, at runtime `v2.69.3`. It answers one question: **on which
 runtime releases is a provider binary built at release N valid?**
 
-Short answer: only on N, as far as anything can prove today. Hence the rule at the
-end.
+Short answer: on the releases whose shared headers are byte-identical to N's — a range
+that can be computed and is checked in CI. Section 7 is the rule.
 
-How this was established: by reading the five source files, by `nm` / `otool` on a
-macOS build of them (LeapC replaced by the compile-check stub, see
-`tests/leapc_stub/`), and by reading the runtime headers at the pinned tag. The
-Windows import table was **not** inspected (no Windows build was made); the
-`windows` CI job prints it.
+How this was established: by reading the sources, by `nm` / `otool` on a macOS build
+(LeapC replaced by the stand-in, see `tests/leapc_stub/`), and by reading the runtime
+headers at the pinned tag. The Windows import table is printed by the `windows` CI job.
 
 ## 1. The public contract (versioned, safe)
 
@@ -42,7 +40,7 @@ covered by input ABI 1.
 | `struct xrt_hand_joint_set` | written into the runtime's buffer by `get_hand_tracking` (26 joints) | Plain data but large and unversioned (ADR-063 open question 2). A change to `XRT_HAND_JOINT_COUNT` or the joint struct is a buffer overrun or a garbled hand. |
 | `struct xrt_space_relation`, `xrt_pose`, `xrt_vec3`, `xrt_quat`, `union xrt_output_value` | poses out, haptics in | Layout-stable math; safe in practice. |
 
-This table is the whole reason for the exact pin. ADR-063 step 1 (a layout
+This table is the whole reason the runtime range is bounded. ADR-063 step 1 (a layout
 fingerprint the loader checks) would turn a mismatch into a logged refusal; step 2
 (the provider-device descriptor) would remove the table.
 
@@ -60,7 +58,7 @@ pinned.
 | `math_pose_transform`, `math_pose_invert` | `math/m_api.h` (Eigen) | Used by `ultraleap_map.c`. |
 | `os_mutex_*`, `os_thread_helper_*`, `os_monotonic_get_ns`, `os_nanosleep` | `os/os_threading.h`, `os/os_time.h` | Mostly header-inline over pthreads / Win32. |
 | `U_TYPED_CALLOC`, `U_ZERO` | `util/u_misc.h` | Macros. |
-| `u_openxr_implicit_layer_find`, `u_openxr_layer_ultraleap_advice`, `U_OPENXR_LAYER_ULTRALEAP_*` | `util/u_openxr_layers.{h,c}` | The odd one: see section 6. In the trunk since 2026-11-03 (#2508), so no runtime tag older than that can be pinned. |
+| `u_openxr_implicit_layer_find`, `struct u_openxr_implicit_layer` | `util/u_openxr_layers.{h,c}` | The generic lookup only; the Ultraleap-specific half now lives here (section 6). In the trunk since 2026-11-03 (#2508), so no runtime tag older than that can be pinned. |
 | cJSON | via `aux_util` | See section 5. |
 
 On **Linux** this list also includes `u_log*` and `u_var_*`: the provider links no
@@ -83,8 +81,9 @@ u_var_add_root  u_var_remove_root
 u_var_add_bool  u_var_add_f32  u_var_add_ro_i32  u_var_add_ro_u64  u_var_add_vec3_f32
 ```
 
-On Windows the same functions are `__declspec(dllimport)` (`XRT_API_FUNC` in
-`u_logging.h` and `u_var.h`); the import table itself is unverified.
+On Windows the same functions are `__declspec(dllimport)` from `DisplayXRClient.dll`
+(`XRT_API_FUNC` in `u_logging.h` and `u_var.h`); the `windows` CI job prints the
+import table of the stand-in build.
 
 Risk: these are ordinary exported functions with no version. If a runtime release
 removes or renames one, the provider fails to load (a clean, logged `LOAD_FAILED`).
@@ -99,9 +98,11 @@ Two consequences that only show up out of tree:
   raw build tree). The build sets a build-tree rpath and an install rpath of
   `@loader_path/../..`, which is right only when the provider is installed inside
   the runtime's `lib/displayxr/plugins`. An install elsewhere needs its own rpath.
-  On Windows the equivalent question — can a host that is not the runtime DLL
-  (`displayxr-service.exe`, `displayxr-cli.exe`) resolve the runtime DLL for a
-  provider installed under `Plugins\Ultraleap\` — is **unverified**.
+  On Windows the same question has an answer in the runtime: its loader pins
+  `DisplayXRClient.dll` into the hosting process by absolute path before loading any
+  component (`target_plugin_preload_runtime_core_dll`), so a provider installed under
+  `Plugins\Ultraleap\` resolves its imports in `displayxr-service.exe` and
+  `displayxr-cli.exe` too. The `windows` CI job runs exactly that layout.
 - **The whole runtime is a build dependency.** Linking the import library means
   building the runtime library first (minutes), with its full dependency set.
 
@@ -121,13 +122,16 @@ ADR-063 descriptor it could then build against headers only, like
   acceptable (Linux: the distro's `libcjson1`; Windows: whatever vcpkg gives the
   runtime — unverified) or the install must rewrite it as the runtime's own
   packaging does for its plug-ins.
-- **`getenv`.** The provider reads `DXR_ULTRALEAP_SETTLE_MS` and
-  `DXR_ULTRALEAP_PERSIST_HUB` from the process environment, not through
-  `host->get_setting`. Inside the service that is the service's environment, and the
-  CLI cannot set them. `DXR_ULTRALEAP_SETTLE_MS` is also listed in the trunk's
-  generated lever catalog (`cli_lever_catalog.h`), which will lose it when the
-  sources leave. Converting both to declared settings (`SETTLE_MS`, `PERSIST_HUB`)
-  is the fix; it was left alone so that the import stays byte-identical to the trunk.
+- **`getenv` (fixed here).** The trunk version reads `DXR_ULTRALEAP_SETTLE_MS` and
+  `DXR_ULTRALEAP_PERSIST_HUB` from the process environment. In this repository they
+  are the declared settings `SETTLE_MS` and `PERSIST_HUB`, read through
+  `host->get_setting`; the old variable names still work for one release when the
+  setting is not set, with a warning. `DXR_ULTRALEAP_SETTLE_MS` is also a row of the
+  trunk's lever census, which must lose it when the sources leave
+  (`docs/trunk-removal-plan.md`, A6).
+- **LeapC (changed here).** The trunk version links LeapC and, on Windows, stages the
+  SDK's `LeapC.dll` next to the plug-in. This repository links nothing of Ultraleap's
+  and binds LeapC at run time (`docs/packaging.md`).
 - **CMake.** The build needs the runtime's targets `xrt-interfaces`, `aux_util`,
   `aux_os`, `aux_math`, `drv_includes` and the `RUNTIME_TARGET` variable. While the
   trunk still has its own SDK-gated block, a machine **with** the SDK configures two
@@ -147,46 +151,75 @@ ADR-063 descriptor it could then build against headers only, like
    `u_openxr_implicit_layer_find`: "is implicit layer X registered and active?";
 2. Ultraleap-specific knowledge — the layer name and disable-variable constants
    (`U_OPENXR_LAYER_ULTRALEAP_*`) and `u_openxr_layer_ultraleap_advice`, the advisory
-   text. It is shared by exactly two callers: this provider (`ul_plugin_warn_implicit_layer`)
-   and `displayxr-cli` (`check_ultraleap_layer` in `cli_query.c`, the
-   `ULTRALEAP_OPENXR_LAYER` warning in the CLI's text and JSON reports).
+   text, shared in the trunk by the in-tree provider and `displayxr-cli`
+   (`check_ultraleap_layer` in `cli_query.c`, the `ULTRALEAP_OPENXR_LAYER` warning).
 
-Recommendation:
+Done in this repository: (2) is forked into `src/ultraleap/ultraleap_layer.{h,c}`
+(`UL_OPENXR_LAYER_NAME`, `UL_OPENXR_LAYER_DISABLE_ENV`, `ul_layer_advice`). The
+provider now takes only the generic lookup (1) from the runtime tree.
+
+Left for the runtime (the trunk was not touched):
 
 - Keep (1) in the trunk's aux. It is generic and unit-tested there.
-- Move (2) here. The constants and the advice text belong to the component that knows
-  about Ultraleap. The provider then needs only the generic lookup from aux (or its
-  own copy: it is a registry read and a JSON parse).
-- Make the CLI warning data-driven so that the trunk names no vendor: either the
-  catalog note carries it (`notes[].detect.kind = openxr_implicit_layer_active`, as
-  drafted in `catalog/ultraleap-hands.json`), or a provider declares the layers it
-  conflicts with in its registration (a `ConflictingLayers` value / manifest array)
-  and the CLI prints a generic "implicit layer X conflicts with provider Y" line.
-  Either way `cli_query.c` loses its `"ultraleap"` string match.
+- Remove (2) from the trunk once `displayxr-cli` no longer needs it, by making the CLI
+  warning data-driven so that the trunk names no vendor: either the catalog note
+  carries it (`notes[].detect.kind = openxr_implicit_layer_active`, as drafted in
+  `catalog/ultraleap-hands.json`), or a provider declares the layers it conflicts with
+  in its registration (a `ConflictingLayers` value / manifest array) and the CLI
+  prints a generic "implicit layer X conflicts with provider Y" line. Until then the
+  advice text exists twice and can drift.
 
-Until that happens the provider keeps calling the trunk helper, which means: **the
-removal PR must not delete `u_openxr_layers.{h,c}`**, and the pinned tag must carry it.
+The removal PR must not delete `u_openxr_layers.{h,c}`: this provider still compiles
+the generic lookup from the pinned runtime tree.
 
 ## 7. The rule
 
-**Until ADR-063 lands, the catalog entry pins an exact runtime range:
-`min == max ==` the runtime release the binary was built at** (`DXR_RUNTIME_GIT_TAG`
-in `CMakeLists.txt`). The installer records it (`Plugins\Ultraleap\RuntimePin`) and
-refuses a different installed runtime; `scripts/check_catalog.py` keeps the catalog
-equal to the CMake pin in CI.
+**A provider binary built at runtime tag P is valid on every runtime release whose
+shared headers are byte-identical to P's.** "Shared headers" are the ones that define
+memory or calls the two sides share: the include closure of `xrt_device.h`,
+`xrt_input_plugin.h`, `xrt_component_settings.h`, `xrt_results.h` and
+`xrt_tracking.h` under `src/xrt/include` (sections 1 and 2), plus `u_logging.h` and
+`u_var.h` (section 4). Identical bytes mean identical layouts, enumerator values and
+signatures; nothing else in the runtime can change what the provider and the runtime
+exchange.
 
-What that costs, and what is still open:
+`scripts/runtime_range.py` computes it from the runtime's tags:
 
-- **One provider release per runtime release that should have hands.** The runtime
-  releases often; this provider does not change. A cheaper, still conservative way to
-  widen `max` without rebuilding is `scripts/runtime_range.py`, which compares the
-  headers of sections 1, 2 and 4 byte for byte between two tags. Run against the
-  local checkout it reports them identical from `v2.68.0` through `v2.69.2`, and
-  changed between `v2.66.0` and `v2.68.0`. It is a heuristic for a human, and the
-  catalog checker deliberately does not accept its verdict on its own.
-- **Nothing stops a skewed pair from loading.** The exact range is enforced by the
-  installer and (once it honours a maximum) by the catalog client. The runtime's
-  loader checks only the ABI major, so a user who updates the runtime and keeps an
-  older provider gets no refusal. Closing that needs the runtime: ADR-063 step 1.
-- **After ADR-063 step 2** the rule relaxes to: `min` = the build pin, `max` = the
-  last runtime of the same input ABI major — provided section 4 is dealt with too.
+```
+runtime_range.py --runtime <clone> --pin v2.69.3 --suggest
+pin v2.69.3: shared headers identical on v2.68.0 .. v2.69.3
+```
+
+How it is applied:
+
+- `catalog/ultraleap-hands.json` records `runtime_range.build` (the pin), `min` and
+  `verified_max`. Today: built at 2.69.3, valid 2.68.0 – 2.69.3. `v2.67.0` and older
+  differ (three shared headers changed between 2.67.0 and 2.68.0).
+- CI (`range` job) fails if any release inside the recorded range differs from the
+  pin, so the range can only be claimed when it is true.
+- A runtime **newer** than `verified_max` is *unverified*, not known-bad. When the
+  runtime releases, the weekly `runtime-range` workflow goes red and says which of two
+  things to do:
+  - headers identical → raise `verified_max` in the catalog entry. No rebuild, no new
+    provider release;
+  - headers differ → repin (`DXR_RUNTIME_GIT_TAG` + `RUNTIME_REF`), rebuild, release.
+    The new binary's range starts where the headers changed.
+- The installer refuses a runtime older than `min` and warns, without refusing, about
+  one newer than the `verified_max` it was built with.
+
+What the rule does not cover, stated plainly:
+
+- **It is conservative, not exact.** A comment edit in a shared header ends the range
+  although nothing changed. The script does not try to tell; the cost is one
+  unnecessary rebuild.
+- **It assumes the headers are the whole contract.** A runtime change in *behaviour*
+  with unchanged headers (the runtime reading a field it used to ignore, say) is
+  invisible to it. That risk exists for every plug-in and is what release testing is
+  for.
+- **Nothing stops a pair outside the range from loading.** The runtime's loader checks
+  only the ABI major. The range is enforced by the installer (floor) and by whatever
+  client reads the catalog. Closing that needs the runtime: ADR-063 step 1, a layout
+  fingerprint the loader compares.
+- **After ADR-063 step 2** (the provider-device descriptor) the rule relaxes to: `min`
+  = the build pin, no maximum inside one input ABI major — provided section 4 is dealt
+  with too.

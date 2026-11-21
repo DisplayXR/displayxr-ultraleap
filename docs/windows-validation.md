@@ -1,0 +1,118 @@
+# Validation on the Windows box with the Ultraleap hardware
+
+Nothing below has been done. CI covers the build against a stand-in, the load through
+the runtime, and the "no Ultraleap software" state; it cannot cover the real LeapC or
+a camera. Tick items here, then move them to the verified list in `README.md` and
+remove the matching *to verify* markers in `docs/packaging.md`,
+`src/ultraleap/ultraleap_leapc.c` and `catalog/ultraleap-hands.json`.
+
+Record for the run: Ultraleap software version, camera model, runtime version,
+provider commit.
+
+## 1. Build against the real SDK header
+
+- [ ] `scripts\build-windows.bat all` with `LEAPSDK_DIR` set, runtime checkout at the
+      pinned tag. It must compile: `ultraleap_leapc.c` contains a compile-time check
+      that the six bound function-pointer types equal the prototypes of the SDK's
+      `LeapC.h`, so a signature drift is a build error here, not a crash later.
+- [ ] `dumpbin /dependents _package\bin\plugins\DisplayXR-Ultraleap.dll` lists
+      `DisplayXRClient.dll` and **no** `LeapC.dll`; `dumpbin /exports` lists only
+      `xrtInputPluginNegotiate`.
+- [ ] No `LeapC.dll` anywhere under `_package\`.
+
+## 2. Finding LeapC at run time
+
+- [ ] Where the current Ultraleap installer puts `LeapC.dll`. The provider's only
+      default is `%ProgramW6432%\Ultraleap\LeapSDK\lib\x64\LeapC.dll`. If the
+      tracking software installs without the SDK folder, or keeps `LeapC.dll`
+      elsewhere, add that location to `ul_leapc_default_candidate` — otherwise every
+      user needs `LEAPC_PATH`.
+- [ ] With the dev DLL registered (`register_dev_plugin.bat input <dll> ultraleap`),
+      the log (`%LOCALAPPDATA%\DisplayXR\DisplayXR_<exe>.<pid>_<ts>.log`) says
+      `ultraleap: LeapC loaded from <that path>`.
+- [ ] **#933**: on a box that also has the LeiaSR Platform (its own `LeapC.dll` on
+      `PATH`), confirm with Process Explorer / `listdlls` that the `LeapC.dll` mapped
+      into the host is the Ultraleap one, not `LeiaSR\Platform\bin\LeapC.dll`.
+- [ ] `displayxr-cli input set ultraleap LEAPC_PATH <dir>` pointing at a copy in
+      another folder is honoured; pointing at a folder with no `LeapC.dll` gives the
+      not-found state.
+- [ ] Not-found state for real: rename the Ultraleap folder (or test on a box
+      without the software). `displayxr-cli selftest` passes, `input_providers` says
+      the provider loaded with its hardware absent, the log has
+      `Ultraleap tracking software NOT FOUND`, apps get the keyboard/mouse
+      controllers. Restore the folder while an app is running: hands appear within
+      about 5 s plus the connect time, no restart.
+
+## 3. Tracking
+
+- [ ] Camera on the desk, Desktop mode, the Ultraleap layer disabled (section 5):
+      both hands drive the right controllers, left is left.
+- [ ] Pinch → select click, grab → menu click, with hysteresis (no chatter at the
+      threshold).
+- [ ] `XR_EXT_hand_tracking` joints in an app that draws them (26 joints, plausible
+      radii, fingertips that touch stay touching).
+- [ ] Pose prediction: no visible lag or overshoot on fast motion.
+- [ ] `MAPPING=relative` defaults place a hand held about 25 cm above the camera at
+      the display centre; `MAPPING=physical` with measured `MOUNT_*_M` is 1:1.
+- [ ] Both hosting paths: in-process app, and `XRT_FORCE_MODE=ipc` against a running
+      `displayxr-service.exe` (settings then come from the store / the **service's**
+      environment).
+
+## 4. Presence and lifetime
+
+- [ ] Start with the camera unplugged: roles on keyboard/mouse; plug in: roles move
+      to the provider without restarting the app (`displayxr-cli input haptic-test 30`
+      prints the role generation changes); unplug: they move back.
+- [ ] Stop the Ultraleap tracking service while running: presence goes absent, the
+      provider reconnects when the service returns.
+- [ ] Idle watchdog (#941): with no app polling for 5 s the Leap connection closes
+      (log line, and the tracking service's CPU use drops); the next app's first poll
+      reopens it.
+- [ ] `SETTLE_MS=0` and the default 300: the first `xrSyncActions` binds the provider
+      when the camera is attached (no interaction-profile flip right after start).
+- [ ] `PERSIST_HUB`: default keeps one Leap connection across `xrCreateInstance` /
+      `xrDestroyInstance` cycles; `0` logs the per-instance teardown.
+- [ ] Old names: `DXR_ULTRALEAP_SETTLE_MS` / `DXR_ULTRALEAP_PERSIST_HUB` in the host's
+      environment still take effect and log the deprecation warning once.
+- [ ] Conformance smoke (the #1545 case): a run that creates and destroys many
+      instances does not re-spin LeapC each time.
+
+## 5. The Ultraleap implicit OpenXR layer
+
+- [ ] With the layer enabled, the provider logs the advice once and
+      `displayxr-cli selftest` prints `WARN: ULTRALEAP_OPENXR_LAYER`.
+- [ ] `DISABLE_XR_APILAYER_ULTRALEAP_HAND_TRACKING_1=1` in the user environment,
+      OpenXR apps restarted, Desktop mode re-selected: hands are no longer swapped.
+- [ ] The registry value name of the layer's manifest contains
+      `UltraleapHandTracking` (the installer's check matches on that), and which hive
+      it is in.
+
+## 6. Installer
+
+- [ ] `scripts\build-windows.bat installer`, then run
+      `DisplayXRUltraleapSetup-*.exe` interactively and with `/S`.
+- [ ] Rows written: `InputProviders\ultraleap` (`Binary`, `ProbeOrder` 50, `Version`
+      last), the allowlist digest, `Plugins\Ultraleap\*`. `displayxr-cli input list`
+      shows the provider with provenance `allowlisted` (or `signed`).
+- [ ] Only `DisplayXR-Ultraleap.dll` and `Uninstall.exe` in
+      `C:\Program Files\DisplayXR\Plugins\Ultraleap\`.
+- [ ] Runtime range: on a runtime older than the minimum the installer stops with
+      exit code 3 (`/FORCE` installs); on one newer than the verified maximum it
+      installs with the notice. Check the format of
+      `HKLM\Software\DisplayXR\Runtime\Version` that the comparison reads.
+- [ ] Without the Ultraleap software: the installer says so and still installs.
+- [ ] Upgrade over itself while `displayxr-service.exe` is running: the DLL is
+      released (Restart Manager) and the service comes back non-elevated.
+- [ ] Uninstall removes exactly its rows and files, with and without the runtime
+      installed.
+- [ ] Do not run the installer or uninstaller on a shared dev box that has a
+      hand-registered dev row you want to keep: it overwrites
+      `InputProviders\ultraleap`.
+
+## 7. Release lane (when a runner exists)
+
+- [ ] A self-hosted runner labelled `ultraleap-sdk` with the SDK installed; set the
+      repository variables `ULTRALEAP_SDK_RUNNER=true` and `ULTRALEAP_LEAPSDK_DIR`.
+      The `sdk-windows` job goes green.
+- [ ] Signed build path: `SIGN_CMD` set, `scripts\build-windows.bat all` signs the
+      DLL, the installer and the uninstaller.
