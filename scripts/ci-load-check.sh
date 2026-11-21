@@ -35,7 +35,10 @@ prov=$(find1 'DisplayXR-Ultraleap-STUBCHECK.*')
 sim=$(find1 'DisplayXR-SimDisplay.*')
 stubdir="$build/tests/leapc_stub_lib"
 for f in "$cli" "$prov" "$sim"; do
-	[ -n "$f" ] && [ -e "$f" ] || { echo "missing a build product (cli / provider / sim display) under $build" >&2; exit 2; }
+	if [ -z "$f" ] || [ ! -e "$f" ]; then
+		echo "missing a build product (cli / provider / sim display) under $build" >&2
+		exit 2
+	fi
 done
 ls "$stubdir"/*LeapC* >/dev/null
 

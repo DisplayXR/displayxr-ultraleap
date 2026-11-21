@@ -281,6 +281,19 @@ jobs:
           Write-Host "dependents:"; $deps | ForEach-Object { Write-Host "  $_" }
           if ($deps -match '(?i)LeapC') { throw "the provider must not import LeapC.dll - it is bound at run time" }
           if (-not ($deps -match '(?i)DisplayXRClient\.dll')) { throw "expected an import of the runtime DLL (DisplayXRClient.dll)" }
+          # Out-of-tree layout: the provider sits alone in Plugins\Ultraleap\, so any
+          # non-system DLL it imports must already be resident in the host - i.e.
+          # be an import of DisplayXRClient.dll itself, which the runtime's loader
+          # pins before loading a component. Anything else would fail to resolve
+          # on an installed machine.
+          $core = Get-ChildItem -Recurse build -Filter DisplayXRClient.dll | Where-Object { $_.FullName -notmatch 'vcpkg_installed' } | Select-Object -First 1
+          $coreDeps = (& dumpbin /nologo /dependents $core.FullName) | Where-Object { $_ -match '\.dll\s*$' } | ForEach-Object { $_.Trim().ToLower() }
+          Write-Host "DisplayXRClient.dll dependents:"; $coreDeps | ForEach-Object { Write-Host "  $_" }
+          $system = '^(kernel32|advapi32|user32|gdi32|shell32|ole32|oleaut32|ws2_32|msvcp140.*|vcruntime140.*|ucrtbase|api-ms-win-.*|setupapi|winmm|version|bcrypt|crypt32|wintrust)\.dll$'
+          $own = $deps | ForEach-Object { $_.ToLower() } | Where-Object { $_ -match '\.dll$' -and $_ -notmatch '^dump of file' -and $_ -ne 'displayxrclient.dll' -and $_ -notmatch $system }
+          $orphans = $own | Where-Object { $coreDeps -notcontains $_ }
+          if ($orphans) { throw "the provider imports DLL(s) the runtime core does not load, so they would not resolve from Plugins\Ultraleap\: $($orphans -join ', ')" }
+          Write-Host "non-system imports, all resident via the runtime core: $($own -join ', ')"
           Write-Host "imported from the runtime DLL:"
           & dumpbin /nologo /imports:DisplayXRClient.dll $dll.FullName | Select-String -Pattern '^\s+[0-9A-F]+\s+(u_\S+)' | ForEach-Object { Write-Host ("  " + $_.Matches[0].Groups[1].Value) }
       - name: Load through the pinned runtime (installed-style layout)
