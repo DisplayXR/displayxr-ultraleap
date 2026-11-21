@@ -4,6 +4,11 @@
  * @file
  * @brief  COMPILE-CHECK STUB bodies for tests/leapc_stub/LeapC.h. NOT LeapC.
  *
+ * Built as a shared library named like the real one (LeapC.dll /
+ * libLeapC.so / libLeapC.dylib) so the provider's run-time loader can be
+ * exercised end to end without the Ultraleap software. It lives in the build
+ * tree only; nothing installs or packages it.
+ *
  * Behaves like "the tracking service is reachable, no device is attached and
  * no frame ever arrives": a connection can be created and opened, and every
  * poll times out. That is enough for the provider to load, negotiate, create
@@ -32,6 +37,13 @@ stub_sleep_ms(uint32_t ms)
 	nanosleep(&ts, NULL);
 }
 #endif
+
+/*
+ * The marker. ultraleap_leapc.c looks for this symbol: a compile-check build
+ * of the provider binds ONLY a library that has it, and a real build refuses
+ * one that does.
+ */
+int dxr_leapc_compile_check_stub_marker = 1;
 
 struct _LEAP_CONNECTION
 {

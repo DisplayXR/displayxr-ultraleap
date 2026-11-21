@@ -196,6 +196,52 @@ ul_map_orientation(float x, float y, float z, float w);
 void
 ul_map_joints_to_hand_frame(struct xrt_hand_joint_set *set);
 
+/*
+ *
+ * Hub settings (not mapping, but declared and parsed with the rest so the
+ * whole settings surface is one pure, unit-tested table).
+ *
+ */
+
+//! Default of `SETTLE_MS`: how long create_devices waits for a presence verdict.
+#define UL_HUB_DEFAULT_SETTLE_MS 300
+//! Upper bound of `SETTLE_MS` (it blocks xrCreateInstance).
+#define UL_HUB_MAX_SETTLE_MS 5000
+
+struct ul_hub_config
+{
+	//! `SETTLE_MS`: 0..UL_HUB_MAX_SETTLE_MS; 0 = do not wait.
+	int settle_ms;
+	//! `PERSIST_HUB`: keep the LeapC connection across XrInstances (#1545).
+	bool persist_hub;
+	//! `LEAPC_PATH`: the LeapC library, or the directory holding it; "" = look in the default places.
+	char leapc_path[512];
+};
+
+void
+ul_hub_config_defaults(struct ul_hub_config *out);
+
+/*!
+ * Read `SETTLE_MS`, `PERSIST_HUB` and `LEAPC_PATH` through @p get_setting
+ * over the defaults. A NULL getter leaves the defaults; an out-of-range or
+ * unparseable value keeps its default. Sets the two `*_set` flags (may be
+ * NULL) when the key came from a setting, so the caller can tell whether a
+ * legacy environment alias should still apply.
+ */
+void
+ul_hub_config_from_settings(xrt_component_get_setting_fn_t get_setting,
+                            struct ul_hub_config *out,
+                            bool *out_settle_set,
+                            bool *out_persist_set);
+
+//! Parse a `SETTLE_MS` value; false (and @p out untouched) when out of range or not a number.
+bool
+ul_hub_parse_settle_ms(const char *text, int *out);
+
+//! Parse a bool setting ("1"/"0", true/false, on/off, yes/no); false when unrecognised.
+bool
+ul_hub_parse_bool(const char *text, bool *out);
+
 //! The `describe_settings` slot: this provider's declared keys.
 uint32_t
 ul_map_describe_settings(const struct xrt_component_setting_desc **out_descs);

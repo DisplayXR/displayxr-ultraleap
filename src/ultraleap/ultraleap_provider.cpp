@@ -5,6 +5,11 @@
  * @file
  * @brief  Ultraleap (Leap Motion) input provider — LeapC → motion controllers.
  *
+ * FORKED from the runtime trunk (v2.69.3): LeapC is bound at run time
+ * (`ultraleap_leapc.h`) instead of linked, so a machine without the
+ * Ultraleap tracking software gets a provider that loads and reports its
+ * hardware absent; `SETTLE_MS` / `PERSIST_HUB` are settings.
+ *
  * Adapted from Monado's removed `ultraleap_v5` driver (`ulv5_driver.cpp`,
  * restored from the pre-strip history for #825): the LeapC poll thread and
  * 26-joint processing survive; the device model changes from one
@@ -51,9 +56,8 @@
 #include "util/u_logging.h"
 
 #include "ultraleap_interface.h"
+#include "ultraleap_leapc.h"
 #include "ultraleap_map.h"
-
-#include "LeapC.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,9 +115,16 @@
  * first arbitration — worth it because that one decides whether the app's
  * opening `xrSyncActions` binds Leap or qwerty, and a flip right after
  * startup costs an `XrEventDataInteractionProfileChanged`.
- * `DXR_ULTRALEAP_SETTLE_MS=0` disables the wait.
+ * The `SETTLE_MS` setting (`UL_HUB_DEFAULT_SETTLE_MS`, ultraleap_map.h);
+ * 0 disables the wait.
  */
-#define UL_SETTLE_DEFAULT_MS 300
+
+/*!
+ * How often the poll thread looks again for LeapC while the Ultraleap
+ * tracking software is not installed (or its connection cannot be created).
+ * A few file-existence checks per attempt.
+ */
+#define UL_LEAPC_RETRY_NS (5LL * 1000 * 1000 * 1000)
 
 /*!
  * How long the poll thread waits after opening a connection before
@@ -162,6 +173,24 @@ struct ul_hub
 
 	//! Guards device button/joint state and the offset estimate.
 	struct os_mutex mutex;
+
+	/*!
+	 * LeapC, bound at run time (ultraleap_leapc.h), or NULL while the
+	 * Ultraleap tracking software has not been found. Written by
+	 * ul_hub_create before the poll thread starts and by the poll thread
+	 * afterwards; read by the poll thread and by ul_hub_destroy after it
+	 * has stopped.
+	 */
+	const struct ul_leapc *leap;
+
+	//! `connection` is a live LeapC connection object (leap != NULL).
+	bool connection_created;
+
+	//! The LEAPC_PATH setting the poll thread retries with.
+	char leapc_path[512];
+
+	//! Mirror of ul_leapc_state_get() for the debug UI.
+	int32_t leapc_state;
 
 	LEAP_CONNECTION connection;
 
@@ -542,10 +571,10 @@ ul_handle_tracking_event(struct ul_hub *hub, const LEAP_TRACKING_EVENT *ev, int6
 static bool
 ul_open_connection(struct ul_hub *hub)
 {
-	if (LeapOpenConnection(hub->connection) != eLeapRS_Success) {
+	if (hub->leap->OpenConnection(hub->connection) != eLeapRS_Success) {
 		return false;
 	}
-	LeapSetTrackingMode(hub->connection, eLeapTrackingMode_Desktop);
+	hub->leap->SetTrackingMode(hub->connection, eLeapTrackingMode_Desktop);
 	hub->connect_started_ns = (int64_t)os_monotonic_get_ns();
 	return true;
 }
@@ -608,7 +637,7 @@ ul_handle_presence_event(struct ul_hub *hub, const LEAP_CONNECTION_MESSAGE *msg)
 		// A lost connection never comes back by polling it —
 		// LeapPollConnection just returns Timeout forever, silently.
 		// Recycle it and reconnect eagerly (see eager_reconnect).
-		LeapCloseConnection(hub->connection);
+		hub->leap->CloseConnection(hub->connection);
 		hub->leap_connected = false;
 		hub->eager_reconnect = true;
 		U_LOG_W("ultraleap: tracking service dropped the connection — reconnecting eagerly.");
@@ -618,10 +647,75 @@ ul_handle_presence_event(struct ul_hub *hub, const LEAP_CONNECTION_MESSAGE *msg)
 	}
 }
 
+/*!
+ * Make sure LeapC is bound and a connection object exists. Returns false
+ * while the Ultraleap tracking software cannot be used; logs the reason
+ * once per distinct state (@p first_try also logs the success line).
+ * Called from ul_hub_create (before the poll thread exists) and then only
+ * from the poll thread.
+ */
+static bool
+ul_hub_ensure_connection(struct ul_hub *hub, bool first_try)
+{
+	if (hub->leap == NULL) {
+		char detail[2048];
+		const enum ul_leapc_state before = ul_leapc_state_get();
+		const enum ul_leapc_state st = ul_leapc_load(hub->leapc_path, detail, sizeof(detail));
+		hub->leapc_state = (int32_t)st;
+		if (st != UL_LEAPC_LOADED) {
+			if (first_try || st != before) {
+				U_LOG_W("ultraleap: Ultraleap tracking software %s (%s). The provider stays loaded and "
+				        "reports its hardware absent; it looks again every %d s. Install the Ultraleap "
+				        "tracking software, or set the LEAPC_PATH setting to its LeapC library.",
+				        st == UL_LEAPC_NOT_FOUND ? "NOT FOUND" : "found but NOT USABLE", detail,
+				        (int)(UL_LEAPC_RETRY_NS / (1000 * 1000 * 1000)));
+			}
+			return false;
+		}
+		hub->leap = ul_leapc_get();
+		U_LOG_W("ultraleap: %s.", detail);
+	}
+	if (!hub->connection_created) {
+		eLeapRS result = hub->leap->CreateConnection(NULL, &hub->connection);
+		if (result != eLeapRS_Success) {
+			if (first_try) {
+				U_LOG_E("ultraleap: LeapCreateConnection failed (%s) - retrying every %d s.",
+				        leap_result_to_string(result), (int)(UL_LEAPC_RETRY_NS / (1000 * 1000 * 1000)));
+			}
+			return false;
+		}
+		hub->connection_created = true;
+	}
+	return true;
+}
+
 static void *
 ul_poll_thread(void *ptr)
 {
 	struct ul_hub *hub = (struct ul_hub *)ptr;
+
+	// No LeapC yet: the Ultraleap tracking software is not installed (or
+	// not usable). That is a state, not an error - say ABSENT so the
+	// runtime keeps its own controllers, and keep looking so that
+	// installing the software later needs no restart of anything but the
+	// tracking service itself.
+	while (!ul_hub_ensure_connection(hub, false)) {
+		ul_set_presence(hub, XRT_INPUT_PROVIDER_PRESENCE_ABSENT);
+		for (int64_t waited = 0; waited < UL_LEAPC_RETRY_NS; waited += 100LL * 1000 * 1000) {
+			if (!os_thread_helper_is_running(&hub->oth)) {
+				return NULL;
+			}
+			os_nanosleep(100 * 1000 * 1000);
+		}
+	}
+	// Found after all: presence goes back to "not known yet" and the
+	// normal connect grace decides.
+	os_mutex_lock(&hub->mutex);
+	const bool was_absent = hub->presence == XRT_INPUT_PROVIDER_PRESENCE_ABSENT;
+	os_mutex_unlock(&hub->mutex);
+	if (was_absent) {
+		ul_set_presence(hub, XRT_INPUT_PROVIDER_PRESENCE_UNKNOWN);
+	}
 
 	if (!ul_open_connection(hub)) {
 		U_LOG_E("ultraleap: LeapOpenConnection failed — is the Ultraleap tracking service running?");
@@ -733,7 +827,7 @@ ul_poll_thread(void *ptr)
 		// (a closed connection can never report a Device event), so
 		// presence would otherwise be pinned at ABSENT forever.
 		if (presence == XRT_INPUT_PROVIDER_PRESENCE_PRESENT && now - last_activity > UL_IDLE_TIMEOUT_NS) {
-			LeapCloseConnection(hub->connection);
+			hub->leap->CloseConnection(hub->connection);
 			hub->leap_connected = false;
 			hub->idle_since_ns = now;
 			hub->reconnect_started_ns = 0;
@@ -752,7 +846,7 @@ ul_poll_thread(void *ptr)
 		}
 
 		LEAP_CONNECTION_MESSAGE msg;
-		eLeapRS result = LeapPollConnection(hub->connection, 500 /* ms */, &msg);
+		eLeapRS result = hub->leap->PollConnection(hub->connection, 500 /* ms */, &msg);
 		if (result == eLeapRS_Timeout) {
 			continue; // idle — re-check the stop flag
 		}
@@ -807,7 +901,7 @@ ul_poll_thread(void *ptr)
  * never unloaded either, for the same reason the DP loader leaks its
  * handles (`target_input_plugin_loader.h`).
  *
- * `DXR_ULTRALEAP_PERSIST_HUB=0` restores the pre-#1545 per-instance
+ * The `PERSIST_HUB` setting = 0 restores the pre-#1545 per-instance
  * teardown, for bisecting.
  */
 static struct ul_hub *g_ul_hub = NULL;
@@ -829,19 +923,14 @@ ul_hub_lock(void)
 	return lock;
 }
 
-//! Does the hub outlive its devices? Read once. Caller holds ul_hub_lock().
+//! The `PERSIST_HUB` setting of the most recent create_devices. Guarded by ul_hub_lock().
+static bool g_ul_persist_hub = true;
+
+//! Does the hub outlive its devices? Caller holds ul_hub_lock().
 static bool
 ul_hub_persists(void)
 {
-	static int cached = -1;
-	if (cached < 0) {
-		const char *env = getenv("DXR_ULTRALEAP_PERSIST_HUB");
-		cached = (env == NULL || env[0] != '0') ? 1 : 0;
-		if (cached == 0) {
-			U_LOG_W("ultraleap: DXR_ULTRALEAP_PERSIST_HUB=0 — hub torn down per XrInstance.");
-		}
-	}
-	return cached != 0;
+	return g_ul_persist_hub;
 }
 
 static void
@@ -852,10 +941,12 @@ ul_hub_destroy(struct ul_hub *hub)
 	// The poll thread is gone, so nothing maintains presence any more.
 	g_ul_presence = (int)XRT_INPUT_PROVIDER_PRESENCE_UNKNOWN;
 
-	if (hub->leap_connected) {
-		LeapCloseConnection(hub->connection);
+	if (hub->leap != NULL && hub->connection_created) {
+		if (hub->leap_connected) {
+			hub->leap->CloseConnection(hub->connection);
+		}
+		hub->leap->DestroyConnection(hub->connection);
 	}
-	LeapDestroyConnection(hub->connection);
 
 	u_var_remove_root(hub);
 	os_thread_helper_destroy(&hub->oth);
@@ -868,7 +959,10 @@ ul_hub_destroy(struct ul_hub *hub)
  * and sets @p out_err on failure. Caller holds ul_hub_lock().
  */
 static struct ul_hub *
-ul_hub_create(const struct ul_map_config *map_cfg, float display_height_m, xrt_result_t *out_err)
+ul_hub_create(const struct ul_map_config *map_cfg,
+              const struct ul_hub_config *hub_cfg,
+              float display_height_m,
+              xrt_result_t *out_err)
 {
 	*out_err = XRT_ERROR_ALLOCATION;
 
@@ -896,21 +990,24 @@ ul_hub_create(const struct ul_map_config *map_cfg, float display_height_m, xrt_r
 		return NULL;
 	}
 
-	eLeapRS result = LeapCreateConnection(NULL, &hub->connection);
-	if (result != eLeapRS_Success) {
-		U_LOG_E("ultraleap: LeapCreateConnection failed (%s) — falling back.", leap_result_to_string(result));
-		os_thread_helper_destroy(&hub->oth);
-		os_mutex_destroy(&hub->mutex);
-		free(hub);
-		*out_err = XRT_ERROR_DEVICE_CREATION_FAILED;
-		return NULL;
+	// Bind LeapC from the Ultraleap install and create the connection
+	// object. Failing is NOT fatal: without the Ultraleap tracking software
+	// the hub still comes up, says ABSENT at once (a definitive answer for
+	// the first role arbitration - no settle wait needed), and its poll
+	// thread keeps looking.
+	snprintf(hub->leapc_path, sizeof(hub->leapc_path), "%s", hub_cfg->leapc_path);
+	if (!ul_hub_ensure_connection(hub, true)) {
+		hub->presence = XRT_INPUT_PROVIDER_PRESENCE_ABSENT;
+		g_ul_presence = (int)XRT_INPUT_PROVIDER_PRESENCE_ABSENT;
 	}
 
 	// Started before any device exists: every slot is NULL and the poll
 	// thread skips them, which is exactly the state it has to survive
 	// between instances anyway.
 	if (os_thread_helper_start(&hub->oth, ul_poll_thread, hub) != 0) {
-		LeapDestroyConnection(hub->connection);
+		if (hub->connection_created) {
+			hub->leap->DestroyConnection(hub->connection);
+		}
 		os_thread_helper_destroy(&hub->oth);
 		os_mutex_destroy(&hub->mutex);
 		free(hub);
@@ -924,6 +1021,7 @@ ul_hub_create(const struct ul_map_config *map_cfg, float display_height_m, xrt_r
 	u_var_add_f32(hub, &hub->map_cfg.gain_h_per_m, "gain_h_per_m (relative)");
 	u_var_add_vec3_f32(hub, &hub->map_cfg.mount_m, "mount_m (physical)");
 	u_var_add_f32(hub, &hub->display_height_m, "display_height_m");
+	u_var_add_ro_i32(hub, &hub->leapc_state, "leapc_state (1 loaded, 2 not found, 3 unusable)");
 	u_var_add_bool(hub, &hub->leap_connected, "leap_connected");
 	u_var_add_ro_u64(hub, &hub->idle_disconnects, "idle_disconnects");
 	u_var_add_ro_i32(hub, &hub->attached_devices, "attached_devices");
@@ -1200,6 +1298,7 @@ ul_create_device(struct ul_hub *hub, int hand)
 
 extern "C" xrt_result_t
 ul_create_devices(const struct ul_map_config *map_cfg,
+                  const struct ul_hub_config *hub_cfg,
                   float display_height_m,
                   struct xrt_device **out_left,
                   struct xrt_device **out_right)
@@ -1210,10 +1309,19 @@ ul_create_devices(const struct ul_map_config *map_cfg,
 	// into existence (#1545).
 	std::lock_guard<std::mutex> guard(ul_hub_lock());
 
+	g_ul_persist_hub = hub_cfg->persist_hub;
+	if (!g_ul_persist_hub) {
+		static bool s_said = false;
+		if (!s_said) {
+			s_said = true;
+			U_LOG_W("ultraleap: PERSIST_HUB=0 - hub torn down per XrInstance.");
+		}
+	}
+
 	const bool reused = g_ul_hub != NULL;
 	if (!reused) {
 		xrt_result_t xret = XRT_SUCCESS;
-		g_ul_hub = ul_hub_create(map_cfg, display_height_m, &xret);
+		g_ul_hub = ul_hub_create(map_cfg, hub_cfg, display_height_m, &xret);
 		if (g_ul_hub == NULL) {
 			return xret;
 		}
@@ -1297,14 +1405,7 @@ ul_create_devices(const struct ul_map_config *map_cfg,
 	// every ~250 ms — it just avoids a qwerty→Leap flip, and the
 	// XrEventDataInteractionProfileChanged it implies, moments into the
 	// first session.
-	int settle_ms = UL_SETTLE_DEFAULT_MS;
-	const char *settle_env = getenv("DXR_ULTRALEAP_SETTLE_MS");
-	if (settle_env != NULL) {
-		int v = atoi(settle_env);
-		if (v >= 0 && v <= 5000) {
-			settle_ms = v;
-		}
-	}
+	const int settle_ms = hub_cfg->settle_ms;
 	for (int waited = 0; waited < settle_ms; waited += 20) {
 		if (g_ul_presence != (int)XRT_INPUT_PROVIDER_PRESENCE_UNKNOWN) {
 			break;

@@ -7,6 +7,11 @@
  * Implements @ref xrt_input_plugin_negotiate_fn_t (ADR-034 / #825) for
  * the Ultraleap hand-as-motion-controller provider.
  *
+ * FORKED from the runtime trunk (`src/xrt/drivers/ultraleap/`, v2.69.3):
+ * LeapC is bound at run time instead of linked, `SETTLE_MS` / `PERSIST_HUB`
+ * are settings instead of environment variables, and the implicit-layer
+ * advice text lives in this repository (`ultraleap_layer.h`).
+ *
  * `probe()` deliberately always succeeds: it answers "should this
  * provider be loaded", which is a registration decision, not a hardware
  * one. Whether a Leap Motion is actually plugged in is answered
@@ -34,15 +39,15 @@
 #include "xrt/xrt_results.h"
 
 #include "ultraleap_interface.h"
+#include "ultraleap_layer.h"
 #include "ultraleap_map.h"
-
-#include "util/u_logging.h"
 
 #include "util/u_logging.h"
 #include "util/u_openxr_layers.h"
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 
 /*
@@ -112,12 +117,43 @@ ul_plugin_warn_implicit_layer(void)
 	}
 	s_checked = true;
 	struct u_openxr_implicit_layer layer;
-	if (!u_openxr_implicit_layer_find(U_OPENXR_LAYER_ULTRALEAP_HAND_TRACKING, &layer) || !layer.active) {
+	if (!u_openxr_implicit_layer_find(UL_OPENXR_LAYER_NAME, &layer) || !layer.active) {
 		return;
 	}
 	char advice[1024];
-	u_openxr_layer_ultraleap_advice(&layer, advice, sizeof(advice));
+	ul_layer_advice(&layer, advice, sizeof(advice));
 	U_LOG_W("ultraleap: %s", advice);
+}
+
+/*!
+ * `SETTLE_MS` / `PERSIST_HUB` used to be read straight from the process
+ * environment as `DXR_ULTRALEAP_SETTLE_MS` / `DXR_ULTRALEAP_PERSIST_HUB`.
+ * They are settings now (so the CLI can set them and the service host sees
+ * them). The old names still apply for one release when the setting is not
+ * set anywhere, with one WARN naming the replacement.
+ */
+static void
+ul_plugin_apply_legacy_env(struct ul_hub_config *cfg, bool settle_set, bool persist_set)
+{
+	static bool s_warned = false;
+	bool used = false;
+
+	const char *settle = getenv("DXR_ULTRALEAP_SETTLE_MS");
+	if (!settle_set && settle != NULL && ul_hub_parse_settle_ms(settle, &cfg->settle_ms)) {
+		used = true;
+	}
+	const char *persist = getenv("DXR_ULTRALEAP_PERSIST_HUB");
+	if (!persist_set && persist != NULL) {
+		cfg->persist_hub = persist[0] != '0'; // The old rule: anything but a leading '0' is on.
+		used = true;
+	}
+	if (used && !s_warned) {
+		s_warned = true;
+		U_LOG_W("ultraleap: DXR_ULTRALEAP_SETTLE_MS / DXR_ULTRALEAP_PERSIST_HUB are deprecated - use the "
+		        "settings SETTLE_MS / PERSIST_HUB (`displayxr-cli input set ultraleap SETTLE_MS <ms>`, or "
+		        "DXR_INPUT_ULTRALEAP_SETTLE_MS in the hosting process). The old names stop working in a "
+		        "later release.");
+	}
 }
 
 static xrt_result_t
@@ -146,6 +182,11 @@ ul_plugin_create_devices(struct xrt_input_plugin_instance *inst,
 	// cache is published before any provider's create_devices (§4b.6).
 	struct ul_map_config map_cfg;
 	ul_map_config_from_settings(g_ul_get_setting, &map_cfg);
+	struct ul_hub_config hub_cfg;
+	bool settle_set = false;
+	bool persist_set = false;
+	ul_hub_config_from_settings(g_ul_get_setting, &hub_cfg, &settle_set, &persist_set);
+	ul_plugin_apply_legacy_env(&hub_cfg, settle_set, persist_set);
 	const float display_height_m = ul_plugin_display_height_m();
 	if (display_height_m <= 0.0f && map_cfg.mode == UL_MAPPING_RELATIVE) {
 		U_LOG_W(
@@ -156,7 +197,7 @@ ul_plugin_create_devices(struct xrt_input_plugin_instance *inst,
 
 	struct xrt_device *left = NULL;
 	struct xrt_device *right = NULL;
-	xrt_result_t xret = ul_create_devices(&map_cfg, display_height_m, &left, &right);
+	xrt_result_t xret = ul_create_devices(&map_cfg, &hub_cfg, display_height_m, &left, &right);
 	if (xret != XRT_SUCCESS) {
 		return xret;
 	}

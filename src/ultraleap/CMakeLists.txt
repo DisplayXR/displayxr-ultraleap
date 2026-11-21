@@ -15,6 +15,10 @@
 
 add_library(displayxr_ultraleap SHARED
     ultraleap_interface.h
+    ultraleap_layer.c
+    ultraleap_layer.h
+    ultraleap_leapc.c
+    ultraleap_leapc.h
     ultraleap_map.c
     ultraleap_map.h
     ultraleap_plugin.c
@@ -51,11 +55,13 @@ target_include_directories(displayxr_ultraleap PRIVATE
 # SYSTEM: the SDK header is not ours to warn about.
 target_include_directories(displayxr_ultraleap SYSTEM PRIVATE ${ULTRALEAP_LEAPC_INCLUDE_DIR})
 
+# LeapC is NOT linked: the provider binds it at run time from the Ultraleap
+# install (ultraleap_leapc.c). Only the header is needed to build. The
+# compile-check build differs in the header alone (and in its output name).
+target_link_libraries(displayxr_ultraleap PRIVATE ${CMAKE_DL_LIBS})
 if(ULTRALEAP_LEAPC_IS_STUB)
-    target_link_libraries(displayxr_ultraleap PRIVATE leapc_stub)
     set(_ul_output_name "DisplayXR-Ultraleap-STUBCHECK")
 else()
-    target_link_libraries(displayxr_ultraleap PRIVATE ${ULTRALEAP_LEAPC_LIBRARY})
     set(_ul_output_name "DisplayXR-Ultraleap")
 endif()
 
@@ -100,32 +106,12 @@ endif()
 
 include(GNUInstallDirs)
 if(WIN32)
+    # Only the provider DLL is installed. LeapC.dll is never staged or shipped:
+    # the provider opens it by absolute path from the Ultraleap install at run
+    # time, so another LeapC.dll on PATH cannot be picked up (#933).
     install(TARGETS displayxr_ultraleap
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/plugins
         LIBRARY DESTINATION ${CMAKE_INSTALL_BINDIR}/plugins)
-
-    # LeapC.dll and #933 - see docs/packaging.md for both choices.
-    #
-    # The LeiaSR Platform puts its own LeapC.dll on the system PATH. The
-    # runtime's input loader loads the provider by absolute path with
-    # LOAD_WITH_ALTERED_SEARCH_PATH, so a LeapC.dll staged NEXT TO the provider
-    # wins the dependency search; without one, the by-name import resolves
-    # through the default search order and can bind to a different LeapC.
-    if(ULTRALEAP_BUNDLE_LEAPC)
-        if(NOT ULTRALEAP_LEAPC_RUNTIME_DLL)
-            message(FATAL_ERROR
-                "ULTRALEAP_BUNDLE_LEAPC=ON but no LeapC.dll was found next to ${ULTRALEAP_LEAPC_LIBRARY}.")
-        endif()
-        add_custom_command(TARGET displayxr_ultraleap POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ULTRALEAP_LEAPC_RUNTIME_DLL}"
-                "$<TARGET_FILE_DIR:displayxr_ultraleap>/LeapC.dll"
-            COMMENT "Staging LeapC.dll app-local next to DisplayXR-Ultraleap (#933)")
-        install(FILES "${ULTRALEAP_LEAPC_RUNTIME_DLL}" DESTINATION ${CMAKE_INSTALL_BINDIR}/plugins)
-        message(STATUS "LeapC.dll: BUNDLED from ${ULTRALEAP_LEAPC_RUNTIME_DLL} (check the redistribution licence before publishing)")
-    else()
-        message(STATUS "LeapC.dll: NOT bundled (default). The installed provider resolves LeapC from the "
-                       "Ultraleap tracking software; dev builds: scripts\\build-windows.bat stages a local copy.")
-    endif()
 else()
     install(TARGETS displayxr_ultraleap
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/displayxr/plugins)

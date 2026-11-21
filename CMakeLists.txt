@@ -12,9 +12,11 @@
 #      libraries (device allocator, relation history, u_var, threading) and, on
 #      Windows / macOS, the runtime's import library. See
 #      docs/trunk-dependencies.md — that is why the pin is exact, not a floor.
-#   2. The Ultraleap tracking SDK (LeapC). NOT redistributed here and not
-#      fetched: point LEAPSDK_DIR at an install, or let the default SDK paths
-#      find it. Without it nothing shippable is built (see the message below).
+#   2. The Ultraleap tracking SDK's HEADER (LeapC.h). NOT redistributed here
+#      and not fetched: point LEAPSDK_DIR at an install, or let the default SDK
+#      paths find it. Without it nothing shippable is built (see the message
+#      below). The LeapC LIBRARY is not linked: the provider binds it at run
+#      time from the user's Ultraleap install (src/ultraleap/ultraleap_leapc.c).
 
 cmake_minimum_required(VERSION 3.22)
 
@@ -36,10 +38,7 @@ endif()
 
 option(ULTRALEAP_BUILD_TESTS "Build the hardware-free unit tests (ctest)" ON)
 option(ULTRALEAP_USE_LEAPC_STUB
-    "COMPILE-CHECK ONLY: build against tests/leapc_stub instead of the real LeapC SDK. The result is NOT a working provider and is never installed or packaged."
-    OFF)
-option(ULTRALEAP_BUNDLE_LEAPC
-    "Windows: stage + install the SDK's LeapC.dll next to the provider (#933). OFF until the redistribution licence is cleared - see docs/packaging.md."
+    "COMPILE-CHECK ONLY: build against the stand-in header in tests/leapc_stub instead of the real LeapC.h. The result is NOT a working provider and is never installed or packaged."
     OFF)
 
 # --------------------------------------------------------------------------
@@ -53,11 +52,12 @@ option(ULTRALEAP_BUNDLE_LEAPC
 # Keep the pin a plain literal: the runtime's downstream-pin tooling
 # (downstream-pins.json, kind=cmake_set) regexes `set(DXR_RUNTIME_GIT_TAG "vX.Y.Z"`.
 #
-# WHY EXACT: the provider returns raw `struct xrt_device`s, which the input
-# plug-in ABI version does not cover (runtime ADR-063, Proposed). A binary
-# built at one runtime release is only known-good on that release. The catalog
-# entry (catalog/ultraleap-hands.json) and the installer's runtime check both
-# derive from this pin.
+# WHAT THE PIN MEANS: the provider returns raw `struct xrt_device`s, which the
+# input plug-in ABI version does not cover (runtime ADR-063, Proposed). A
+# binary built at this tag is valid on the runtime releases whose shared
+# headers are byte-identical to this tag's (scripts/runtime_range.py). That
+# VERIFIED RANGE is recorded in catalog/ultraleap-hands.json and checked in CI;
+# the installer's runtime floor derives from it (docs/trunk-dependencies.md).
 # --------------------------------------------------------------------------
 set(DXR_RUNTIME_GIT_TAG "v2.69.3" CACHE STRING
     "displayxr-runtime release tag this provider is built against (exact pin, ADR-063).")
@@ -111,8 +111,12 @@ if(NOT TARGET aux_util OR NOT TARGET aux_math OR NOT TARGET aux_os OR NOT TARGET
     message(FATAL_ERROR "The runtime tree at ${DXR_RUNTIME_ROOT} did not define the aux targets this provider links.")
 endif()
 
-# Minimum / maximum runtime the built binary is valid for: the pin, exactly.
 string(REGEX REPLACE "^v" "" DXR_RUNTIME_PIN_VERSION "${DXR_RUNTIME_GIT_TAG}")
+# The verified runtime range lives in the catalog entry (one source of truth).
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/catalog/ultraleap-hands.json" _ul_catalog)
+string(JSON DXR_RUNTIME_RANGE_MIN GET "${_ul_catalog}" runtime_range min)
+string(JSON DXR_RUNTIME_RANGE_MAX GET "${_ul_catalog}" runtime_range verified_max)
+message(STATUS "Runtime pin ${DXR_RUNTIME_GIT_TAG}; verified range ${DXR_RUNTIME_RANGE_MIN} .. ${DXR_RUNTIME_RANGE_MAX}")
 
 # --------------------------------------------------------------------------
 # LeapC.
@@ -135,8 +139,8 @@ if(NOT ULTRALEAP_LEAPC_FOUND)
     message(STATUS " Ultraleap input provider: NOT BUILT - LeapC SDK not found.")
     message(STATUS "")
     message(STATUS " Install the Ultraleap tracking software + SDK (Gemini / Hyperion),")
-    message(STATUS " or point LEAPSDK_DIR at an SDK root that has LeapC.h and the")
-    message(STATUS " LeapC library:")
+    message(STATUS " or point LEAPSDK_DIR at an SDK root that has include/LeapC.h")
+    message(STATUS " (only the header is needed to build; LeapC is bound at run time):")
     message(STATUS "     cmake -S . -B build -DLEAPSDK_DIR=<path to LeapSDK>")
     message(STATUS " Default locations searched:")
     foreach(_p IN LISTS ULTRALEAP_LEAPC_DEFAULT_ROOTS)

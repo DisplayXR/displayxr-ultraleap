@@ -31,14 +31,19 @@ extern "C" {
 
 struct xrt_device;
 struct ul_map_config;
+struct ul_hub_config;
 
 /*!
  * Create the left+right motion-controller devices, bringing the hub
  * (LeapC connection + poll thread) up on the FIRST call of the process and
- * reusing it on every later one (#1545). Fails only if the LeapC connection
- * cannot be created at all (tracking service absent) — with the service
- * up but no device plugged in, the devices exist and report untracked
- * until hands appear, mirroring net_input's no-feeder semantics.
+ * reusing it on every later one (#1545). It does NOT fail when the Ultraleap
+ * tracking software is missing: LeapC is bound at run time
+ * (`ultraleap_leapc.h`), and a machine without it gets devices that never
+ * track, presence ABSENT, one log line saying where it looked, and a poll
+ * thread that keeps looking — so the runtime falls back to its own
+ * controllers and installing the Ultraleap software later just works. With
+ * the service up but no camera plugged in, the devices exist and report
+ * untracked until hands appear, mirroring net_input's no-feeder semantics.
  *
  * May be called many times per process: the runtime creates a device set
  * per `xrt_system_devices`, i.e. per `xrCreateInstance`, while the provider
@@ -48,7 +53,7 @@ struct ul_map_config;
  * tracking-service connection a few seconds later if nothing polls).
  *
  * Before returning it waits a bounded settle window
- * (`DXR_ULTRALEAP_SETTLE_MS`, default 300) for the LeapC connection to
+ * (the `SETTLE_MS` setting, default 300) for the LeapC connection to
  * say whether a device is actually attached, so the runtime's very first
  * role arbitration usually gets a definitive answer rather than
  * @ref XRT_INPUT_PROVIDER_PRESENCE_UNKNOWN.
@@ -63,6 +68,7 @@ struct ul_map_config;
  */
 xrt_result_t
 ul_create_devices(const struct ul_map_config *map_cfg,
+                  const struct ul_hub_config *hub_cfg,
                   float display_height_m,
                   struct xrt_device **out_left,
                   struct xrt_device **out_right);

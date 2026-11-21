@@ -10,6 +10,7 @@
 
 #include "math/m_api.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -36,6 +37,14 @@ static const struct xrt_component_setting_desc g_descs[] = {
     {"MOUNT_Y_M", XRT_COMPONENT_SETTING_TYPE_FLOAT, "-0.15", "physical: Leap origin above the display centre, metres"},
     {"MOUNT_Z_M", XRT_COMPONENT_SETTING_TYPE_FLOAT, "0.10",
      "physical: Leap origin in front of the display glass, metres"},
+    {"SETTLE_MS", XRT_COMPONENT_SETTING_TYPE_INT, "300",
+     "0-5000: how long xrCreateInstance waits for the Leap service to say whether a camera is attached, so the "
+     "first role assignment is right; 0 = do not wait"},
+    {"PERSIST_HUB", XRT_COMPONENT_SETTING_TYPE_BOOL, "1",
+     "1 = keep one Leap connection for the life of the process; 0 = a new connection per XrInstance (diagnostic)"},
+    {"LEAPC_PATH", XRT_COMPONENT_SETTING_TYPE_STRING, "",
+     "absolute path of the Ultraleap LeapC library, or of the directory holding it; empty = the default Ultraleap "
+     "install location"},
 };
 
 uint32_t
@@ -131,6 +140,87 @@ ul_map_config_from_settings(xrt_component_get_setting_fn_t get_setting, struct u
 	read_float(get_setting, "MOUNT_X_M", &out->mount_m.x);
 	read_float(get_setting, "MOUNT_Y_M", &out->mount_m.y);
 	read_float(get_setting, "MOUNT_Z_M", &out->mount_m.z);
+}
+
+
+/*
+ *
+ * Hub settings.
+ *
+ */
+
+void
+ul_hub_config_defaults(struct ul_hub_config *out)
+{
+	out->settle_ms = UL_HUB_DEFAULT_SETTLE_MS;
+	out->persist_hub = true;
+	out->leapc_path[0] = '\0';
+}
+
+bool
+ul_hub_parse_settle_ms(const char *text, int *out)
+{
+	if (text == NULL || text[0] == '\0') {
+		return false;
+	}
+	char *end = NULL;
+	const long v = strtol(text, &end, 10);
+	if (end == text || v < 0 || v > UL_HUB_MAX_SETTLE_MS) {
+		return false;
+	}
+	*out = (int)v;
+	return true;
+}
+
+bool
+ul_hub_parse_bool(const char *text, bool *out)
+{
+	if (text == NULL) {
+		return false;
+	}
+	if (ieq(text, "1") || ieq(text, "true") || ieq(text, "on") || ieq(text, "yes")) {
+		*out = true;
+		return true;
+	}
+	if (ieq(text, "0") || ieq(text, "false") || ieq(text, "off") || ieq(text, "no")) {
+		*out = false;
+		return true;
+	}
+	return false;
+}
+
+void
+ul_hub_config_from_settings(xrt_component_get_setting_fn_t get_setting,
+                            struct ul_hub_config *out,
+                            bool *out_settle_set,
+                            bool *out_persist_set)
+{
+	ul_hub_config_defaults(out);
+	if (out_settle_set != NULL) {
+		*out_settle_set = false;
+	}
+	if (out_persist_set != NULL) {
+		*out_persist_set = false;
+	}
+	if (get_setting == NULL) {
+		return;
+	}
+
+	char v[32];
+	if (read_key(get_setting, "SETTLE_MS", v, sizeof(v)) && ul_hub_parse_settle_ms(v, &out->settle_ms)) {
+		if (out_settle_set != NULL) {
+			*out_settle_set = true;
+		}
+	}
+	if (read_key(get_setting, "PERSIST_HUB", v, sizeof(v)) && ul_hub_parse_bool(v, &out->persist_hub)) {
+		if (out_persist_set != NULL) {
+			*out_persist_set = true;
+		}
+	}
+	char path[sizeof(out->leapc_path)];
+	if (read_key(get_setting, "LEAPC_PATH", path, sizeof(path))) {
+		snprintf(out->leapc_path, sizeof(out->leapc_path), "%s", path);
+	}
 }
 
 

@@ -22,6 +22,7 @@
 #include "math/m_space.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
@@ -323,7 +324,7 @@ TEST_CASE("describe_settings declares every key with the compiled defaults", "[u
 	for (uint32_t i = 0; i < n; i++) {
 		declared[descs[i].key] = descs[i].default_value;
 	}
-	REQUIRE(declared.size() == 8);
+	REQUIRE(declared.size() == 11);
 	CHECK(declared["MAPPING"] == "relative");
 	CHECK(std::stof(declared["ANCHOR_X_H"]) == UL_MAP_DEFAULT_ANCHOR_X_H);
 	CHECK(std::stof(declared["ANCHOR_Y_H"]) == UL_MAP_DEFAULT_ANCHOR_Y_H);
@@ -332,6 +333,72 @@ TEST_CASE("describe_settings declares every key with the compiled defaults", "[u
 	CHECK(std::stof(declared["MOUNT_X_M"]) == UL_MAP_DEFAULT_MOUNT_X_M);
 	CHECK(std::stof(declared["MOUNT_Y_M"]) == UL_MAP_DEFAULT_MOUNT_Y_M);
 	CHECK(std::stof(declared["MOUNT_Z_M"]) == UL_MAP_DEFAULT_MOUNT_Z_M);
+	CHECK(std::stoi(declared["SETTLE_MS"]) == UL_HUB_DEFAULT_SETTLE_MS);
+	CHECK(declared["PERSIST_HUB"] == "1");
+	CHECK(declared["LEAPC_PATH"].empty());
+}
+
+namespace {
+std::map<std::string, std::string> g_hub_settings;
+bool
+hub_get_setting(const char *id, const char *key, char *buf, uint32_t cap)
+{
+	if (std::string(id) != UL_PROVIDER_ID) {
+		return false;
+	}
+	auto it = g_hub_settings.find(key);
+	if (it == g_hub_settings.end()) {
+		return false;
+	}
+	std::snprintf(buf, cap, "%s", it->second.c_str());
+	return true;
+}
+} // namespace
+
+TEST_CASE("hub settings: SETTLE_MS, PERSIST_HUB, LEAPC_PATH replace the old environment knobs", "[ultraleap_map]")
+{
+	struct ul_hub_config cfg;
+	bool settle_set = true;
+	bool persist_set = true;
+
+	// No getter, or nothing set: the compiled defaults, and "not set" reported.
+	ul_hub_config_from_settings(nullptr, &cfg, &settle_set, &persist_set);
+	CHECK(cfg.settle_ms == UL_HUB_DEFAULT_SETTLE_MS);
+	CHECK(cfg.persist_hub);
+	CHECK(cfg.leapc_path[0] == '\0');
+	CHECK_FALSE(settle_set);
+	CHECK_FALSE(persist_set);
+
+	g_hub_settings.clear();
+	ul_hub_config_from_settings(hub_get_setting, &cfg, &settle_set, &persist_set);
+	CHECK(cfg.settle_ms == UL_HUB_DEFAULT_SETTLE_MS);
+	CHECK_FALSE(settle_set);
+
+	g_hub_settings = {{"SETTLE_MS", "0"}, {"PERSIST_HUB", "off"}, {"LEAPC_PATH", "C:\\Leap\\LeapC.dll"}};
+	ul_hub_config_from_settings(hub_get_setting, &cfg, &settle_set, &persist_set);
+	CHECK(cfg.settle_ms == 0);
+	CHECK_FALSE(cfg.persist_hub);
+	CHECK(std::string(cfg.leapc_path) == "C:\\Leap\\LeapC.dll");
+	CHECK(settle_set);
+	CHECK(persist_set);
+
+	// Out of range / not a number / not a bool: the default stays and the key counts as not set.
+	g_hub_settings = {{"SETTLE_MS", "5001"}, {"PERSIST_HUB", "maybe"}};
+	ul_hub_config_from_settings(hub_get_setting, &cfg, &settle_set, &persist_set);
+	CHECK(cfg.settle_ms == UL_HUB_DEFAULT_SETTLE_MS);
+	CHECK(cfg.persist_hub);
+	CHECK_FALSE(settle_set);
+	CHECK_FALSE(persist_set);
+
+	int ms = -1;
+	CHECK(ul_hub_parse_settle_ms("5000", &ms));
+	CHECK(ms == 5000);
+	CHECK_FALSE(ul_hub_parse_settle_ms("-1", &ms));
+	CHECK_FALSE(ul_hub_parse_settle_ms("abc", &ms));
+	CHECK(ms == 5000);
+	bool b = false;
+	CHECK(ul_hub_parse_bool("YES", &b));
+	CHECK(b);
 }
 
 
