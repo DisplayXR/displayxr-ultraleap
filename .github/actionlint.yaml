@@ -1,0 +1,4 @@
+self-hosted-runner:
+  # The SDK tier's runner: a Windows box with the Ultraleap SDK installed.
+  labels:
+    - ultraleap-sdk

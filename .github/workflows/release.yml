@@ -1,0 +1,159 @@
+# Copyright 2026, The DisplayXR Project
+# SPDX-License-Identifier: BSL-1.0
+#
+# Tag-triggered release: vX.Y.Z -> DisplayXRUltraleapSetup-X.Y.Z.<run>.exe on
+# the GitHub Release.
+#
+# The release CANNOT be built on a hosted runner: it needs the Ultraleap SDK.
+# It runs on the same self-hosted runner as build.yml's SDK tier
+# ([self-hosted, windows, ultraleap-sdk]). If no such runner is online the job
+# stays queued - check the runner before tagging.
+#
+# SIGNING follows the runtime's convention
+# (displayxr-runtime docs/specs/runtime/release-signing.md):
+#   - what this workflow builds is UNSIGNED; the installer carries the
+#     allowlist row for the exact DLL it packs, so it still loads (ADR-054 N4b);
+#   - a signed installer is produced by a SIGNING PROVIDER that rebuilds this
+#     tag on its own runner with a runner-local SIGN_CMD, and replaces the
+#     unsigned asset. No provider is named in this repository: the provider is
+#     `DXR_SIGN_REPO`, read from the release machine's environment by
+#     scripts/sign-release.sh, or from a repository VARIABLE of the same name by
+#     the optional `sign` job below. Unset = the release ships unsigned;
+#   - signing never gates publishing.
+# The provider's runner needs the Ultraleap SDK too (it rebuilds the DLL).
+#
+# VERSIONS: the `bump` job tells displayxr-runtime's versions-bump.yml about the
+# release. It is gated on the repository variable DXR_VERSIONS_BUMP, because the
+# runtime must first learn the `ultraleap` field (docs/trunk-removal-plan.md).
+
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+
+env:
+  # MUST equal DXR_RUNTIME_GIT_TAG in CMakeLists.txt (checked below).
+  RUNTIME_REF: v2.69.3
+
+jobs:
+  windows:
+    name: windows installer (unsigned)
+    runs-on: [self-hosted, windows, ultraleap-sdk]
+    env:
+      LEAPSDK_DIR: ${{ vars.ULTRALEAP_LEAPSDK_DIR }}
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version from tag + pin self-check
+        id: ver
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $pin = (Select-String -Path CMakeLists.txt -Pattern '^set\(DXR_RUNTIME_GIT_TAG "(v[0-9.]+)"').Matches[0].Groups[1].Value
+          if ($pin -ne $env:RUNTIME_REF) { throw "pin drift: CMakeLists.txt $pin vs workflow $env:RUNTIME_REF" }
+          # project(VERSION) follows the tag.
+          $out = Get-Content CMakeLists.txt | ForEach-Object {
+            if ($_ -match '^(\s*)VERSION\s+\d+\.\d+\.\d+(\s*)$') { "$($Matches[1])VERSION $ver$($Matches[2])" } else { $_ }
+          }
+          Set-Content -Path CMakeLists.txt -Value $out -Encoding UTF8
+          python -I scripts/check_catalog.py catalog/ultraleap-hands.json --runtime-pin $pin --version $ver
+          if ($LASTEXITCODE -ne 0) { throw "catalog manifest does not match this release" }
+      - name: Checkout displayxr-runtime (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: DisplayXR/displayxr-runtime
+          ref: ${{ env.RUNTIME_REF }}
+          path: displayxr-runtime
+      - name: Prepare the runtime checkout (vcpkg + OpenXR loader)
+        shell: cmd
+        run: |
+          cd displayxr-runtime
+          call scripts\build_windows.bat generate
+      - name: Build provider + installer
+        shell: cmd
+        env:
+          DXR_RUNTIME_SOURCE_DIR: ${{ github.workspace }}\displayxr-runtime
+          BUILD_NUM: ${{ github.run_number }}
+        run: call scripts\build-windows.bat all Release
+      - name: Assert the real provider
+        shell: pwsh
+        run: |
+          $deps = & dumpbin /nologo /dependents _package\bin\plugins\DisplayXR-Ultraleap.dll
+          if (-not ($deps -match 'LeapC\.dll')) { throw "the provider does not import LeapC.dll" }
+          if (Get-ChildItem _package -Filter '*STUBCHECK*' -Recurse) { throw "a stub artifact is in the package tree" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: _package/DisplayXRUltraleapSetup-*.exe
+          if-no-files-found: error
+
+  release:
+    needs: [windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Catalog manifest as a release asset
+        run: cp catalog/ultraleap-hands.json assets/ultraleap-hands.catalog.json
+      - run: ls -l assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            **Unsigned CI build** unless replaced by the signing lane. Built for DisplayXR Runtime ${{ env.RUNTIME_REF }} exactly.
+            Requires the Ultraleap tracking software (not included).
+
+  sign:
+    name: signed installer (optional)
+    needs: [release]
+    # Runs only when a signing provider is configured as a repository VARIABLE.
+    # Nothing here names one. Failure never un-publishes the unsigned release.
+    if: vars.DXR_SIGN_REPO != ''
+    continue-on-error: true
+    runs-on: ubuntu-22.04
+    env:
+      DXR_SIGN_REPO: ${{ vars.DXR_SIGN_REPO }}
+      # A token that may dispatch + read the provider's workflow, and upload
+      # assets here.
+      GH_TOKEN: ${{ secrets.DXR_SIGN_DISPATCH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/sign-release.sh "${{ github.ref_name }}" "${{ github.repository }}"
+
+  bump:
+    name: versions.json bump
+    needs: [release]
+    if: vars.DXR_VERSIONS_BUMP == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Mint dispatch token
+        id: dispatch-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DISPLAYXR_APP_ID }}
+          private-key: ${{ secrets.DISPLAYXR_APP_PRIVATE_KEY }}
+          owner: DisplayXR
+          repositories: displayxr-runtime
+      - name: Dispatch versions.json bump
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.dispatch-token.outputs.token }}
+          repository: DisplayXR/displayxr-runtime
+          event-type: versions-bump
+          client-payload: |
+            {
+              "field":       "ultraleap",
+              "tag":         "${{ github.ref_name }}",
+              "source_repo": "${{ github.repository }}"
+            }
