@@ -119,9 +119,18 @@ ADR-063 descriptor it could then build against headers only, like
   the runtime's bundled `cJSON.c` then fails to compile on macOS when Homebrew's
   `cjson` headers are also on the include path ("cJSON.h and cJSON.c have different
   versions"). A release build must therefore be made where the dependency is
-  acceptable (Linux: the distro's `libcjson1`; Windows: whatever vcpkg gives the
-  runtime — unverified) or the install must rewrite it as the runtime's own
-  packaging does for its plug-ins.
+  acceptable (Linux: the distro's `libcjson1`) or the install must rewrite it as the
+  runtime's own packaging does for its plug-ins.
+- **Windows DLL imports the provider does not ship.** Built in CI with the runtime's
+  vcpkg manifest, the provider imports `DisplayXRClient.dll`, `pthreadVCE3.dll` and
+  `cjson.dll` besides system DLLs. Installed alone under `Plugins\Ultraleap\` it
+  resolves the last two only because `DisplayXRClient.dll` imports them as well and is
+  already pinned in the host. CI asserts that every non-system import of the provider
+  is also an import of the runtime core built from the same tree. What CI cannot see
+  is the **shipped** runtime: if a release build of the runtime links pthreads or
+  cJSON differently from the provider's build, the provider would fail to load. The
+  provider must therefore be built with the same vcpkg configuration as the runtime
+  release it targets (`docs/windows-validation.md`, section 1).
 - **`getenv` (fixed here).** The trunk version reads `DXR_ULTRALEAP_SETTLE_MS` and
   `DXR_ULTRALEAP_PERSIST_HUB` from the process environment. In this repository they
   are the declared settings `SETTLE_MS` and `PERSIST_HUB`, read through

@@ -19,6 +19,12 @@ provider commit.
       `DisplayXRClient.dll` and **no** `LeapC.dll`; `dumpbin /exports` lists only
       `xrtInputPluginNegotiate`.
 - [ ] No `LeapC.dll` anywhere under `_package\`.
+- [ ] Against the **installed, released** runtime: every non-system DLL in the
+      provider's `dumpbin /dependents` (CI saw `pthreadVCE3.dll` and `cjson.dll`) is
+      also in `dumpbin /dependents "C:\Program Files\DisplayXR\Runtime\DisplayXRClient.dll"`
+      or sits in that directory. If not, the provider cannot load from
+      `Plugins\Ultraleap\`: build it with the runtime release's own vcpkg
+      configuration.
 
 ## 2. Finding LeapC at run time
 
