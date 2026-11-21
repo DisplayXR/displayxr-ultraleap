@@ -1,0 +1,11 @@
+{
+    "file_format_version": "1.0",
+    "plugin": {
+        "id":           "ultraleap",
+        "display_name": "Ultraleap Hand Tracking (controller emulation)",
+        "vendor":       "DisplayXR",
+        "version":      "@PROJECT_VERSION@",
+        "binary_path":  "@ULTRALEAP_BINARY_PATH@",
+        "probe_order":  50
+    }
+}
