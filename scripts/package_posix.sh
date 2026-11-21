@@ -2,6 +2,9 @@
 # Copyright 2026, The DisplayXR Project
 # SPDX-License-Identifier: BSL-1.0
 #
+# EXPERIMENTAL - Linux is not a supported platform of this provider yet; no
+# release lane calls this script.
+#
 # Package a `cmake --install` tree as a user-level tarball (Linux):
 #   package_posix.sh <dist-dir> <version> <runtime-pin> <out-dir>
 #
@@ -11,8 +14,8 @@
 # (input-provider-discovery spec: the `-input-provider.json` suffix routes it to
 # the input loader; NNN = ProbeOrder).
 #
-# libLeapC.so is NOT shipped: the provider's DT_NEEDED resolves it from the
-# Ultraleap tracking package the user installed (install.sh checks and says so).
+# libLeapC.so is NOT shipped and not linked: the provider binds it at run time
+# from the Ultraleap install (LEAPC_PATH setting, or the default locations).
 # The tarball refuses to be built from a compile-check (stub) tree.
 set -euo pipefail
 dist=$1; ver=$2; pin=$3; out=$4
@@ -41,16 +44,10 @@ pin=$(cat "$here/RUNTIME_PIN")
 mkdir -p "$dest" "$data/DisplayProcessors"
 cp -a "$here/payload/." "$dest/"
 
-# External prerequisite: the Ultraleap tracking software (libLeapC + its service).
-if ! ldd "$dest/DisplayXR-Ultraleap.so" 2>/dev/null | grep -q 'libLeapC.*=> /'; then
-	echo "WARNING: libLeapC was not found by the dynamic loader."
-	echo "         Install the Ultraleap tracking software for Linux; until then the"
-	echo "         provider fails to load and DisplayXR keeps its keyboard/mouse controllers."
-fi
-# The runtime pin is exact (the device struct is not ABI-versioned, runtime
-# ADR-063). Not checked here: reading the runtime's version means instantiating
-# it (`displayxr-cli info`, line `git-tag:`), which an installer should not do.
-echo "NOTE: this provider build is made for DisplayXR runtime $pin exactly."
+# External prerequisite: the Ultraleap tracking software. Not checked here -
+# the provider loads without it, reports its hardware absent and logs where it
+# looked for libLeapC (set LEAPC_PATH if it is somewhere else).
+echo "NOTE: built at DisplayXR runtime $pin; see the release notes for the verified range."
 echo "      Compare with the 'git-tag:' line of 'displayxr-cli info'."
 
 tmp=$(mktemp "$data/DisplayProcessors/.ul.XXXXXX")

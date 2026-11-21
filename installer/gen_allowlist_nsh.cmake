@@ -12,9 +12,8 @@
 # packaging time, from the exact file the installer packs - never by hand -
 # and the uninstaller removes the same row and only that row.
 #
-# Only DisplayXR-Ultraleap.dll gets a row. LeapC.dll never does: the gate
-# classifies the COMPONENT binary the loader opens, not its dependencies, and
-# LeapC.dll is Ultraleap's (signed by Ultraleap) whichever way it got there.
+# Only DisplayXR-Ultraleap.dll gets a row: it is the only binary this
+# installer ships. LeapC.dll is Ultraleap's and is never installed by us.
 #
 #   cmake -DDLL=<path> -DVERSION=<x.y.z> -DOUT=<Allowlist.nsh> -P gen_allowlist_nsh.cmake
 

@@ -4,15 +4,20 @@
 #
 # Build the Ultraleap input provider on Linux / macOS.
 #
+# EXPERIMENTAL platforms: only Windows is supported and released. This script
+# exists for the hardware-free tests and the compile / load checks.
+#
 #   scripts/build-posix.sh [--stub] [--runtime <dir>] [--sdk <dir>] [--clean]
 #                          [--dev-plugins <dir>] [--release]
 #
-#   --stub            COMPILE-CHECK ONLY: build against tests/leapc_stub instead of
-#                     the Ultraleap SDK. Output is DisplayXR-Ultraleap-STUBCHECK,
-#                     which is not a working provider and is never packaged.
+#   --stub            COMPILE-CHECK ONLY: build against the stand-in header in
+#                     tests/leapc_stub instead of the Ultraleap SDK's LeapC.h.
+#                     Output is DisplayXR-Ultraleap-STUBCHECK, which is not a
+#                     working provider and is never packaged.
 #   --runtime <dir>   use a local displayxr-runtime checkout instead of fetching
 #                     the pinned tag (warns when it is not AT the pinned tag).
-#   --sdk <dir>       LeapSDK root (same as LEAPSDK_DIR in the environment).
+#   --sdk <dir>       LeapSDK root holding include/LeapC.h (same as LEAPSDK_DIR
+#                     in the environment). Only the header is used.
 #   --dev-plugins <dir>
 #                     after the build, write an NNN-ultraleap-input-provider.json
 #                     pointing at the build-tree binary into <dir>, for
@@ -43,7 +48,7 @@ while [ $# -gt 0 ]; do
 	--dev-plugins) devdir=$2; shift ;;
 	--release) type=Release ;;
 	--clean) clean=1 ;;
-	-h | --help) sed -n '5,28p' "$0"; exit 0 ;;
+	-h | --help) sed -n '5,33p' "$0"; exit 0 ;;
 	*) echo "unknown argument: $1" >&2; exit 2 ;;
 	esac
 	shift
@@ -62,7 +67,7 @@ ctest --test-dir "$build" --output-on-failure
 bin=$(find "$build/src/ultraleap" -maxdepth 1 \( -name 'DisplayXR-Ultraleap*.so' -o -name 'DisplayXR-Ultraleap*.dylib' \) 2>/dev/null | head -1 || true)
 if [ -z "$bin" ]; then
 	echo
-	echo "No provider binary was built (LeapC SDK not found). Unit tests ran."
+	echo "No provider binary was built (LeapC.h not found). Unit tests ran."
 	exit 0
 fi
 echo

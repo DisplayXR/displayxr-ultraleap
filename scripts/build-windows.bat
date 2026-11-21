@@ -13,7 +13,8 @@ setlocal enabledelayedexpansion
 ::   config     - Release (default) | RelWithDebInfo | Debug
 ::
 :: Environment:
-::   LEAPSDK_DIR            - Ultraleap LeapSDK root (has include\LeapC.h, lib\x64\).
+::   LEAPSDK_DIR            - Ultraleap LeapSDK root (has include\LeapC.h). Only the
+::                            HEADER is used: LeapC.dll is bound at run time.
 ::                            Default search: C:\Program Files\Ultraleap\LeapSDK.
 ::   DXR_RUNTIME_SOURCE_DIR - a local displayxr-runtime checkout that has been
 ::                            built once with its scripts\build_windows.bat (it
@@ -25,15 +26,11 @@ setlocal enabledelayedexpansion
 ::                            CMake fetches the pinned tag, and you must supply
 ::                            the runtime's build dependencies yourself (vcpkg
 ::                            toolchain, OpenXR loader) - see .github\workflows.
-::   ULTRALEAP_BUNDLE_LEAPC - 1 = pack LeapC.dll into the installer. Licence-
-::                            gated, off by default (docs\packaging.md).
 ::   SIGN_CMD               - code-signing command; empty = unsigned build.
 ::   BUILD_NUM              - fourth version component of the installer name.
 ::
-:: DEV NOTE (#933): a dev build always stages the SDK's LeapC.dll next to the
-:: DLL in _package\bin\plugins so the build-tree provider cannot bind to another
-:: LeapC.dll on PATH. That local copy is for running from the build tree; it is
-:: only PACKAGED when ULTRALEAP_BUNDLE_LEAPC=1.
+:: LeapC.dll is never copied or staged: the provider opens it by absolute path
+:: from the Ultraleap install at run time (LEAPC_PATH setting to override).
 :: ============================================================
 
 set SCRIPT_DIR=%~dp0
@@ -72,7 +69,6 @@ if "%TARGET%"=="installer" if exist "%REPO%build\build.ninja" goto :do_installer
 echo === CMake Generate ===
 set CMAKE_ARGS=-S "%REPO%." -B "%REPO%build" -G "Ninja Multi-Config" -DCMAKE_INSTALL_PREFIX="%REPO%_package"
 if not "%LEAPSDK_DIR%"=="" set CMAKE_ARGS=!CMAKE_ARGS! -DLEAPSDK_DIR="%LEAPSDK_DIR%"
-if "%ULTRALEAP_BUNDLE_LEAPC%"=="1" set CMAKE_ARGS=!CMAKE_ARGS! -DULTRALEAP_BUNDLE_LEAPC=ON
 if not "%BUILD_NUM%"=="" set CMAKE_ARGS=!CMAKE_ARGS! -DBUILD_NUM=%BUILD_NUM%
 if not "%DXR_RUNTIME_SOURCE_DIR%"=="" (
     set CMAKE_ARGS=!CMAKE_ARGS! -DDXR_RUNTIME_SOURCE_DIR="%DXR_RUNTIME_SOURCE_DIR%"
@@ -94,18 +90,9 @@ cmake --build "%REPO%build" --config %CONFIG% --target install
 if errorlevel 1 exit /b 1
 if not exist "%REPO%_package\bin\plugins\DisplayXR-Ultraleap.dll" (
     echo.
-    echo No provider DLL was produced - the LeapC SDK was not found.
-    echo Set LEAPSDK_DIR to a LeapSDK root and run again.
+    echo No provider DLL was produced - LeapC.h was not found.
+    echo Set LEAPSDK_DIR to a LeapSDK root ^(it needs include\LeapC.h^) and run again.
     exit /b 1
-)
-:: #933 dev staging: SDK LeapC.dll next to the build-tree provider.
-set "LEAPC_SRC=%LEAPSDK_DIR%\lib\x64\LeapC.dll"
-if "%LEAPSDK_DIR%"=="" set "LEAPC_SRC=C:\Program Files\Ultraleap\LeapSDK\lib\x64\LeapC.dll"
-if exist "%LEAPC_SRC%" (
-    if not exist "%REPO%_package\bin\plugins\LeapC.dll" copy /Y "%LEAPC_SRC%" "%REPO%_package\bin\plugins\LeapC.dll" >nul
-    echo Staged LeapC.dll next to the dev provider ^(#933^).
-) else (
-    echo WARNING: %LEAPC_SRC% not found - the dev provider resolves LeapC.dll from PATH ^(#933^).
 )
 if "%TARGET%"=="build" goto :done
 

@@ -34,11 +34,6 @@ file(TO_NATIVE_PATH "${UL_ALLOWLIST_NSH}" UL_ALLOWLIST_NSH_NATIVE)
 # the bytes that are packed.
 set(SIGN_CMD "$ENV{SIGN_CMD}" CACHE STRING "Code-signing command (empty = unsigned)")
 
-set(_ul_bundle_define "")
-if(ULTRALEAP_BUNDLE_LEAPC)
-    set(_ul_bundle_define "/DBUNDLE_LEAPC=1")
-endif()
-
 set(_ul_sign_step "")
 if(SIGN_CMD)
     separate_arguments(_ul_sign_argv NATIVE_COMMAND "${SIGN_CMD}")
@@ -62,12 +57,13 @@ add_custom_target(installer
         "/DVERSION_PATCH=${PROJECT_VERSION_PATCH}"
         "/DBUILD_NUM=${BUILD_NUM}"
         "/DRUNTIME_PIN=${DXR_RUNTIME_PIN_VERSION}"
+        "/DRUNTIME_MIN=${DXR_RUNTIME_RANGE_MIN}"
+        "/DRUNTIME_MAX=${DXR_RUNTIME_RANGE_MAX}"
         "/DBIN_DIR=${UL_BIN_DIR}"
         "/DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
         "/DOUTPUT_DIR=${CMAKE_INSTALL_PREFIX}"
         "/DALLOWLIST_NSH=${UL_ALLOWLIST_NSH_NATIVE}"
         "/DSIGN_CMD=${SIGN_CMD}"
-        ${_ul_bundle_define}
         "${CMAKE_CURRENT_SOURCE_DIR}/DisplayXRUltraleapInstaller.nsi"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Building the DisplayXR Ultraleap installer..."
