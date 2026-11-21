@@ -5,10 +5,12 @@
 
     check_catalog.py catalog/ultraleap-hands.json --runtime-pin v2.69.3 [--version 0.1.0]
 
-Fails when the entry's runtime range is not EXACTLY the CMake pin (the ADR-063
-rule: min == max == the runtime the binary was built at), when the registered
-id / ABI range / prerequisite / layer note are missing, or when --version is
-given and the entry advertises another version.
+Fails when runtime_range.build is not the CMake pin, when the range does not
+contain the pin (min <= build <= verified_max), when requires.runtime is not
+">=min", when the registered id / ABI range / prerequisite / layer note are
+missing, or when --version is given and the entry advertises another version.
+Whether the range is TRUE (identical shared headers on every release in it) is
+checked separately, against the runtime's tags: scripts/runtime_range.py.
 """
 import argparse
 import json
@@ -36,9 +38,19 @@ def main() -> int:
     abi = c.get("abi", {}).get("xrt_input_plugin", {})
     need(abi.get("min") == 1 and abi.get("max") == 1, "abi.xrt_input_plugin must be {min:1,max:1}")
     rr = c.get("runtime_range", {})
-    need(rr.get("min") == pin, f"runtime_range.min {rr.get('min')!r} != CMake pin {pin!r}")
-    need(rr.get("max") == pin, f"runtime_range.max {rr.get('max')!r} != CMake pin {pin!r} (exact range, ADR-063)")
-    need(c.get("requires", {}).get("runtime") == f">={pin}", f"requires.runtime must be '>={pin}'")
+
+    def ver(text):
+        try:
+            return tuple(int(x) for x in str(text).split("."))
+        except ValueError:
+            return None
+
+    need(rr.get("build") == pin, f"runtime_range.build {rr.get('build')!r} != CMake pin {pin!r}")
+    lo, hi = ver(rr.get("min")), ver(rr.get("verified_max"))
+    need(lo is not None and hi is not None, "runtime_range.min / verified_max must be X.Y.Z")
+    if lo and hi:
+        need(lo <= ver(pin) <= hi, f"the pin {pin} is outside runtime_range {rr.get('min')}..{rr.get('verified_max')}")
+    need(c.get("requires", {}).get("runtime") == f">={rr.get('min')}", "requires.runtime must be '>=' + runtime_range.min")
     pre = [p.get("id") for p in c.get("prerequisites", [])]
     need("ultraleap-tracking" in pre, "the external prerequisite 'ultraleap-tracking' is missing")
     notes = [n.get("id") for n in c.get("notes", [])]
@@ -50,7 +62,7 @@ def main() -> int:
     for e in errs:
         print(f"catalog: {e}", file=sys.stderr)
     if not errs:
-        print(f"catalog OK: {c['component']} {c['recommended']} for runtime {pin} (exact)")
+        print(f"catalog OK: {c['component']} {c['recommended']}, built at runtime {pin}, range {rr['min']}..{rr['verified_max']}")
     return 1 if errs else 0
 
 

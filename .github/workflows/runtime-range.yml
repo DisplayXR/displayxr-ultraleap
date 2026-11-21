@@ -1,0 +1,39 @@
+# Copyright 2026, The DisplayXR Project
+# SPDX-License-Identifier: BSL-1.0
+#
+# Weekly: is the catalog's verified runtime range still current?
+#
+# The provider is valid on the runtime releases whose shared headers are
+# byte-identical to the pinned one (docs/trunk-dependencies.md, "The rule").
+# When the runtime releases again, this job says which of two things to do:
+#
+#   identical -> raise runtime_range.verified_max in catalog/ultraleap-hands.json
+#                (no rebuild, no provider release);
+#   different -> repin (CMakeLists.txt + RUNTIME_REF in the workflows), rebuild,
+#                and release the provider.
+#
+# It fails (red) when the range is stale or false, so that somebody looks.
+
+name: runtime-range
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+env:
+  RUNTIME_REF: v2.69.3
+
+jobs:
+  range:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: git clone --quiet --filter=blob:none --no-checkout https://github.com/DisplayXR/displayxr-runtime.git rt
+      - name: Verified range vs the runtime's releases
+        run: |
+          set -uo pipefail
+          lo=$(python3 -c "import json;print(json.load(open('catalog/ultraleap-hands.json'))['runtime_range']['min'])")
+          hi=$(python3 -c "import json;print(json.load(open('catalog/ultraleap-hands.json'))['runtime_range']['verified_max'])")
+          python3 -I scripts/runtime_range.py --runtime rt --pin "$RUNTIME_REF" --suggest
+          python3 -I scripts/runtime_range.py --runtime rt --pin "$RUNTIME_REF" --range "$lo" "$hi"
