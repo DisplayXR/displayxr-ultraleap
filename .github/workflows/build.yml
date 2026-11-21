@@ -3,29 +3,36 @@
 #
 # CI for the Ultraleap hands input provider.
 #
-# GitHub-hosted runners carry no Ultraleap SDK (LeapC), and the SDK is not
-# fetched from anywhere public. So this workflow has two tiers:
+# GitHub-hosted runners carry no Ultraleap SDK, and none is fetched. The
+# provider needs only LeapC.h to build (LeapC itself is bound at run time), so
+# the hosted jobs build it against the in-repo STAND-IN header
+# (tests/leapc_stub, -DULTRALEAP_USE_LEAPC_STUB=ON) and run everything that
+# does not need the real thing:
 #
-#   1. NO-SDK tier (always runs, hosted runners):
-#        - pin self-check (CMake pin == RUNTIME_REF here);
-#        - configure WITHOUT the SDK and assert the "NOT BUILT" message;
-#        - build + run the hardware-free mapping unit test;
-#        - COMPILE-CHECK the provider sources against tests/leapc_stub
-#          (-DULTRALEAP_USE_LEAPC_STUB=ON) and assert the single export.
-#      The stub binary is DisplayXR-Ultraleap-STUBCHECK: never uploaded,
-#      never packaged. A green run of this tier means "the sources still
-#      compile and link against the pinned runtime", NOT "the provider works".
+#   lint      actionlint, shellcheck, catalog entry == CMake pin
+#   range     the catalog's runtime range is TRUE: shared headers identical on
+#             every runtime release in it (scripts/runtime_range.py)
+#   linux     configure without the SDK (must say NOT BUILT); unit tests (mapping,
+#             settings, run-time LeapC loader); stand-in build; one export; LOAD
+#             through the pinned runtime's displayxr-cli (not-found state + stand-in)
+#   macos     the same, on macOS
+#   windows   stand-in build with MSVC; unit tests; one export; no LeapC import;
+#             LOAD through the pinned runtime with an installed-style layout
+#   nsis      the installer script compiles (placeholder payload)
 #
-#   2. SDK tier (opt-in, self-hosted): builds the REAL provider + installer on a
-#      runner labelled [self-hosted, windows, ultraleap-sdk] that has the
-#      Ultraleap SDK installed. It only runs when the repository variable
-#      ULTRALEAP_SDK_RUNNER is 'true' - without the gate, a job targeting a
-#      label no runner carries stays `queued` forever, with no error.
+# A green run means "the sources build against the pinned runtime, the provider
+# loads through that runtime's loader, and the no-Ultraleap state behaves".
+# It does NOT mean hand tracking works: no job has LeapC or a camera.
+# Linux and macOS are EXPERIMENTAL platforms - built and load-checked here,
+# not released.
 #
-# BILLING: these jobs build the runtime from source. Free while this repo is
-# public. If it is ever made private, the macOS leg bills at 10x and the
-# Windows legs at 2x against the org's shared Actions allowance - audit before
-# flipping visibility (runtime CLAUDE.md, "Org Actions billing").
+# The stand-in binary is DisplayXR-Ultraleap-STUBCHECK: never uploaded, never
+# packaged.
+#
+#   sdk-windows  the REAL provider + installer, on a self-hosted runner labelled
+#                [self-hosted, windows, ultraleap-sdk]. Runs only when the
+#                repository variable ULTRALEAP_SDK_RUNNER is 'true' - a job
+#                whose label no runner carries would otherwise queue forever.
 
 name: build
 
@@ -34,41 +41,65 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-    inputs:
-      macos:
-        description: "Also run the macOS compile-check leg"
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  # MUST equal DXR_RUNTIME_GIT_TAG in CMakeLists.txt (pin self-check below).
-  # Exact pin: the provider's xrt_device is not ABI-versioned (runtime ADR-063).
+  # MUST equal DXR_RUNTIME_GIT_TAG in CMakeLists.txt (checked in `lint`).
   RUNTIME_REF: v2.69.3
 
 jobs:
-  pin:
-    name: pin self-check
+  lint:
+    name: lint + pin
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: CMake pin == RUNTIME_REF == catalog range
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      - name: CMake pin == RUNTIME_REF in every workflow; catalog entry consistent
         run: |
           set -euo pipefail
           cmake_tag=$(sed -n 's/^set(DXR_RUNTIME_GIT_TAG "\(v[0-9.]*\)".*/\1/p' CMakeLists.txt)
           test -n "$cmake_tag" || { echo "::error::could not read DXR_RUNTIME_GIT_TAG from CMakeLists.txt"; exit 1; }
-          if [ "$cmake_tag" != "$RUNTIME_REF" ]; then
-            echo "::error::pin drift: CMakeLists.txt has $cmake_tag, workflow RUNTIME_REF is $RUNTIME_REF. Bump both in one commit."
-            exit 1
-          fi
+          for wf in .github/workflows/*.yml; do
+            refs=$(sed -n 's/^  RUNTIME_REF: \(v[0-9.]*\)$/\1/p' "$wf")
+            for r in $refs; do
+              if [ "$r" != "$cmake_tag" ]; then
+                echo "::error::pin drift: CMakeLists.txt has $cmake_tag, $wf has RUNTIME_REF $r. Bump them in one commit."
+                exit 1
+              fi
+            done
+          done
           python3 -I scripts/check_catalog.py catalog/ultraleap-hands.json --runtime-pin "$cmake_tag"
-          echo "pin OK: $cmake_tag"
+
+  range:
+    name: runtime range is true
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Runtime tags (no working tree, blobs on demand)
+        run: git clone --quiet --filter=blob:none --no-checkout https://github.com/DisplayXR/displayxr-runtime.git rt
+      - name: Shared headers identical on every release in the catalog's range
+        run: |
+          set -uo pipefail
+          lo=$(python3 -c "import json;print(json.load(open('catalog/ultraleap-hands.json'))['runtime_range']['min'])")
+          hi=$(python3 -c "import json;print(json.load(open('catalog/ultraleap-hands.json'))['runtime_range']['verified_max'])")
+          python3 -I scripts/runtime_range.py --runtime rt --pin "$RUNTIME_REF" --range "$lo" "$hi"
+          rc=$?
+          # 3 = the range is true but a newer runtime exists outside it. That is
+          # the scheduled workflow's business (runtime-range.yml), not a reason
+          # to fail a push.
+          if [ "$rc" = 3 ]; then echo "::warning::a newer runtime release is outside the verified range - see runtime-range.yml"; exit 0; fi
+          exit "$rc"
 
   linux:
-    name: linux (no SDK + stub compile-check)
+    name: linux (stand-in build + load)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -94,86 +125,31 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DDXR_RUNTIME_SOURCE_DIR="$PWD/displayxr-runtime" 2>&1 | tee configure.log
           grep -q "Ultraleap input provider: NOT BUILT - LeapC SDK not found" configure.log
-      - name: Unit tests (hardware-free)
+      - name: Unit tests (mapping, settings, run-time LeapC loader)
         run: |
           cmake --build build
           ctest --test-dir build --output-on-failure
-      - name: Compile-check against the LeapC stub
+      - name: Build against the stand-in header (+ the pinned runtime's CLI and sim display)
         run: |
           set -euo pipefail
-          echo "::warning::LeapC SDK absent: the provider is COMPILE-CHECKED against tests/leapc_stub only. This does not prove it works."
+          echo "::notice::No Ultraleap SDK on this runner: the provider is built against tests/leapc_stub. This checks compile, link and load - not tracking."
           cmake -S . -B build-stub -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DDXR_RUNTIME_SOURCE_DIR="$PWD/displayxr-runtime" -DULTRALEAP_USE_LEAPC_STUB=ON
-          cmake --build build-stub --target displayxr_ultraleap
-      - name: Exactly one exported symbol
+          cmake --build build-stub --target displayxr_ultraleap leapc_stub cli drv_sim_display_plugin
+      - name: Exactly one exported symbol; no LeapC dependency
         run: |
           set -euo pipefail
           so=build-stub/src/ultraleap/DisplayXR-Ultraleap-STUBCHECK.so
           exports=$(nm -D --defined-only "$so" | awk '{print $3}')
-          echo "$exports"
+          echo "exports: $exports"
           test "$exports" = "xrtInputPluginNegotiate"
-
-  windows:
-    name: windows (stub compile-check)
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-      - name: Checkout displayxr-runtime (pinned)
-        uses: actions/checkout@v4
-        with:
-          repository: DisplayXR/displayxr-runtime
-          ref: ${{ env.RUNTIME_REF }}
-          path: displayxr-runtime
-      - name: Setup vcpkg (the runtime's manifest)
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: '${{ github.workspace }}/vcpkg'
-          # Same commit displayxr-leia-plugin pins; keep them aligned.
-          vcpkgGitCommitId: '5d90b0d5d0317336e65662f2bf0d671b0902c632'
-          vcpkgJsonGlob: 'displayxr-runtime/vcpkg.json'
-      - uses: ilammy/msvc-dev-cmd@v1
-      - name: Install OpenXR loader
-        shell: pwsh
-        run: |
-          # Loader .lib for the runtime subdirectory; same rev displayxr-leia-plugin uses.
-          $v = "1.1.51"
-          Invoke-WebRequest -Uri "https://github.com/KhronosGroup/OpenXR-SDK-Source/releases/download/release-$v/openxr_loader_windows-$v.zip" -OutFile openxr_loader.zip
-          Expand-Archive -Path openxr_loader.zip -DestinationPath openxr_sdk -Force
-      - name: Configure (LeapC stub)
-        shell: pwsh
-        run: |
-          Write-Host "::warning::LeapC SDK absent: COMPILE-CHECK against tests/leapc_stub only. This does not prove the provider works."
-          cmake -S . -B build -G "Ninja Multi-Config" `
-            -DDXR_RUNTIME_SOURCE_DIR="${{ github.workspace }}/displayxr-runtime" `
-            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_MANIFEST_DIR="${{ github.workspace }}/displayxr-runtime" `
-            -DOpenXR_ROOT="${{ github.workspace }}/openxr_sdk" `
-            -DULTRALEAP_USE_LEAPC_STUB=ON
-          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
-      - name: Build provider + unit test
-        shell: pwsh
-        run: |
-          cmake --build build --config Release --target displayxr_ultraleap tests_ultraleap_map
-          if ($LASTEXITCODE -ne 0) { throw "build failed" }
-          ctest --test-dir build -C Release --output-on-failure
-          if ($LASTEXITCODE -ne 0) { throw "tests failed" }
-      - name: One export; imports only the runtime DLL + system DLLs
-        shell: pwsh
-        run: |
-          $dll = Get-ChildItem -Recurse build -Filter DisplayXR-Ultraleap-STUBCHECK.dll | Select-Object -First 1
-          if (-not $dll) { throw "stub DLL not found" }
-          $names = (& dumpbin /nologo /exports $dll.FullName) |
-            Select-String -Pattern '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)' |
-            ForEach-Object { $_.Matches[0].Groups[1].Value }
-          Write-Host "exports: $names"
-          if (@($names).Count -ne 1 -or $names -ne 'xrtInputPluginNegotiate') { throw "expected exactly one export, xrtInputPluginNegotiate" }
-          # Recorded for docs/trunk-dependencies.md: which runtime-DLL symbols the
-          # Windows provider really imports (u_log / u_var family expected).
-          & dumpbin /nologo /imports $dll.FullName | Select-String -Pattern '^\s+\S+\.dll$|u_log|u_var' | ForEach-Object { $_.Line }
+          readelf -d "$so" | grep NEEDED
+          if readelf -d "$so" | grep NEEDED | grep -qi leap; then echo "::error::the provider must not link LeapC"; exit 1; fi
+      - name: Load through the pinned runtime (not-found state, then the stand-in)
+        run: scripts/ci-load-check.sh build-stub
 
   macos:
-    name: macos (stub compile-check)
-    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    name: macos (stand-in build + load)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -183,30 +159,167 @@ jobs:
           repository: DisplayXR/displayxr-runtime
           ref: ${{ env.RUNTIME_REF }}
           path: displayxr-runtime
-          # git describe gives the runtime its version; it needs the tag.
-          fetch-tags: true
       - name: Dependencies
         run: |
           brew install cmake ninja eigen
           brew install glslang molten-vk vulkan-headers vulkan-loader
-      - name: Compile-check against the LeapC stub
+      - name: Build against the stand-in header (+ the pinned runtime's CLI and sim display)
         run: |
           set -euo pipefail
-          echo "::warning::LeapC SDK absent: COMPILE-CHECK against tests/leapc_stub only."
-          cmake -S . -B build-stub -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          echo "::notice::No Ultraleap SDK on this runner: built against tests/leapc_stub. Compile, link and load only."
+          cmake -S . -B build-stub -G Ninja -DCMAKE_BUILD_TYPE=Release -DXRT_BUILD_DRIVER_QWERTY=ON \
             -DDXR_RUNTIME_SOURCE_DIR="$PWD/displayxr-runtime" -DULTRALEAP_USE_LEAPC_STUB=ON
-          cmake --build build-stub --target displayxr_ultraleap tests_ultraleap_map
-          ctest --test-dir build-stub --output-on-failure
-          test "$(nm -gU build-stub/src/ultraleap/DisplayXR-Ultraleap-STUBCHECK.dylib | awk '{print $3}')" = "_xrtInputPluginNegotiate"
+          cmake --build build-stub --target displayxr_ultraleap leapc_stub tests_ultraleap_map tests_ultraleap_leapc cli drv_sim_display_plugin
+      - name: Unit tests
+        run: ctest --test-dir build-stub --output-on-failure
+      - name: Exactly one exported symbol; no LeapC dependency
+        run: |
+          set -euo pipefail
+          dylib=build-stub/src/ultraleap/DisplayXR-Ultraleap-STUBCHECK.dylib
+          test "$(nm -gU "$dylib" | awk '{print $3}')" = "_xrtInputPluginNegotiate"
+          otool -L "$dylib"
+          if otool -L "$dylib" | tail -n +3 | grep -qi leapc; then echo "::error::the provider must not link LeapC"; exit 1; fi
+      - name: Load through the pinned runtime (not-found state, then the stand-in)
+        run: scripts/ci-load-check.sh build-stub
+
+  windows:
+    name: windows (stand-in build + load)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout displayxr-runtime (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: DisplayXR/displayxr-runtime
+          ref: ${{ env.RUNTIME_REF }}
+          path: displayxr-runtime
+
+      # vcpkg binary cache, as the runtime's own Windows CI does it: without one
+      # every run rebuilds every port from source.
+      - name: Configure vcpkg binary cache
+        id: vcpkg-bincache
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'vcpkg-bincache'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_BINARY_SOURCES=clear;files,$dir,readwrite"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "dir=$dir"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "image=$env:ImageOS-$env:ImageVersion"
+      - name: Restore vcpkg binary cache
+        id: vcpkg-bincache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vcpkg-bincache.outputs.dir }}
+          key: vcpkg-bin-x64-windows-5d90b0d5-${{ steps.vcpkg-bincache.outputs.image }}-${{ hashFiles('displayxr-runtime/vcpkg.json', 'displayxr-runtime/vcpkg-configuration.json', 'displayxr-runtime/cmake/vcpkg-overlay-ports/**', 'displayxr-runtime/cmake/vcpkg-overlay-triplets/**') }}
+          restore-keys: |
+            vcpkg-bin-x64-windows-5d90b0d5-
+      - name: Setup vcpkg (the runtime's manifest)
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: '${{ github.workspace }}/vcpkg'
+          # The commit the runtime's own CI pins; keep them aligned.
+          vcpkgGitCommitId: '5d90b0d5d0317336e65662f2bf0d671b0902c632'
+          vcpkgJsonGlob: 'displayxr-runtime/vcpkg.json'
+      - name: Provision glslangValidator from vcpkg onto PATH
+        shell: pwsh
+        run: |
+          # The runtime's SPIR-V.cmake needs glslangValidator at configure time.
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows --x-manifest-root="$env:GITHUB_WORKSPACE\displayxr-runtime"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
+          $tool = Get-ChildItem -Path "$env:GITHUB_WORKSPACE" -Recurse -Include glslangValidator.exe,glslang.exe -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -match '[\\/]tools[\\/]' } | Select-Object -First 1
+          if (-not $tool) { throw "glslang tool not found under the vcpkg install tree" }
+          Add-Content -Path $env:GITHUB_PATH -Value $tool.Directory.FullName
+          Write-Host "glslang tool on PATH: $($tool.FullName)"
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install OpenXR loader
+        shell: pwsh
+        run: |
+          # Same loader rev the runtime's CI uses at this tag.
+          $v = "1.1.63"
+          Invoke-WebRequest -Uri "https://github.com/KhronosGroup/OpenXR-SDK-Source/releases/download/release-$v/openxr_loader_windows-$v.zip" -OutFile openxr_loader.zip
+          Expand-Archive -Path openxr_loader.zip -DestinationPath openxr_sdk -Force
+      - name: Configure (stand-in header)
+        id: generate
+        shell: pwsh
+        run: |
+          Write-Host "::notice::No Ultraleap SDK on this runner: built against tests/leapc_stub. Compile, link and load only."
+          cmake -S . -B build -G "Ninja Multi-Config" `
+            -DDXR_RUNTIME_SOURCE_DIR="${{ github.workspace }}/displayxr-runtime" `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_MANIFEST_DIR="${{ github.workspace }}/displayxr-runtime" `
+            -DOpenXR_ROOT="${{ github.workspace }}/openxr_sdk" `
+            -DULTRALEAP_USE_LEAPC_STUB=ON
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+      - name: Save vcpkg binary cache
+        if: always() && steps.generate.outcome == 'success' && steps.vcpkg-bincache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.vcpkg-bincache.outputs.dir }}
+          key: ${{ steps.vcpkg-bincache-restore.outputs.cache-primary-key }}
+      - name: Build provider, tests, and the pinned runtime's CLI + sim display
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target displayxr_ultraleap leapc_stub tests_ultraleap_map tests_ultraleap_leapc cli drv_sim_display_plugin
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "tests failed" }
+      - name: One export; imports the runtime DLL, never LeapC
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Recurse build -Filter DisplayXR-Ultraleap-STUBCHECK.dll | Select-Object -First 1
+          if (-not $dll) { throw "stub DLL not found" }
+          $names = (& dumpbin /nologo /exports $dll.FullName) |
+            Select-String -Pattern '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          Write-Host "exports: $names"
+          if (@($names).Count -ne 1 -or $names -ne 'xrtInputPluginNegotiate') { throw "expected exactly one export, xrtInputPluginNegotiate" }
+          $deps = (& dumpbin /nologo /dependents $dll.FullName) | Where-Object { $_ -match '\.dll\s*$' } | ForEach-Object { $_.Trim() }
+          Write-Host "dependents:"; $deps | ForEach-Object { Write-Host "  $_" }
+          if ($deps -match '(?i)LeapC') { throw "the provider must not import LeapC.dll - it is bound at run time" }
+          if (-not ($deps -match '(?i)DisplayXRClient\.dll')) { throw "expected an import of the runtime DLL (DisplayXRClient.dll)" }
+          Write-Host "imported from the runtime DLL:"
+          & dumpbin /nologo /imports:DisplayXRClient.dll $dll.FullName | Select-String -Pattern '^\s+[0-9A-F]+\s+(u_\S+)' | ForEach-Object { Write-Host ("  " + $_.Matches[0].Groups[1].Value) }
+      - name: Load through the pinned runtime (installed-style layout)
+        shell: pwsh
+        run: ./scripts/ci-load-check.ps1 -Build build -Config Release
+
+  nsis:
+    name: installer script compiles
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: NSIS
+        run: sudo apt-get update && sudo apt-get install -y nsis cmake
+      - name: Compile with a placeholder payload
+        run: |
+          set -euo pipefail
+          # No provider DLL exists on this runner. The payload is a placeholder
+          # file: this checks the script, the generated allowlist include and
+          # the defines - not an installer anyone should run.
+          w=$(mktemp -d)
+          mkdir -p "$w/bin/plugins" "$w/out"
+          printf 'placeholder - not a DLL\n' > "$w/bin/plugins/DisplayXR-Ultraleap.dll"
+          cmake -DDLL="$w/bin/plugins/DisplayXR-Ultraleap.dll" -DVERSION=0.0.0 -DOUT="$w/Allowlist.nsh" -P installer/gen_allowlist_nsh.cmake
+          lo=$(python3 -c "import json;print(json.load(open('catalog/ultraleap-hands.json'))['runtime_range']['min'])")
+          hi=$(python3 -c "import json;print(json.load(open('catalog/ultraleap-hands.json'))['runtime_range']['verified_max'])")
+          makensis -V3 -WX -DVERSION=0.0.0 -DVERSION_MAJOR=0 -DVERSION_MINOR=0 -DVERSION_PATCH=0 -DBUILD_NUM=0 \
+            -DRUNTIME_PIN="${RUNTIME_REF#v}" -DRUNTIME_MIN="$lo" -DRUNTIME_MAX="$hi" \
+            -DBIN_DIR="$w/bin" -DSOURCE_DIR="$PWD" -DOUTPUT_DIR="$w/out" -DALLOWLIST_NSH="$w/Allowlist.nsh" \
+            installer/DisplayXRUltraleapInstaller.nsi
+          ls -l "$w/out"
+          test -f "$w/out/DisplayXRUltraleapSetup-0.0.0.0.exe"
 
   sdk-windows:
-    name: windows (REAL SDK, self-hosted)
+    name: windows (REAL SDK header, self-hosted)
     # Gate: see the header. Set the repository variable once a runner exists.
     if: vars.ULTRALEAP_SDK_RUNNER == 'true'
     runs-on: [self-hosted, windows, ultraleap-sdk]
     env:
-      # The runner provides both: an Ultraleap SDK install and a runtime
-      # checkout it keeps built (vcpkg + OpenXR loader). Neither is fetched.
+      # The runner provides an Ultraleap SDK install (for LeapC.h). Not fetched.
       LEAPSDK_DIR: ${{ vars.ULTRALEAP_LEAPSDK_DIR }}
     steps:
       - uses: actions/checkout@v4
@@ -226,14 +339,15 @@ jobs:
         env:
           DXR_RUNTIME_SOURCE_DIR: ${{ github.workspace }}\displayxr-runtime
         run: call scripts\build-windows.bat all Release
-      - name: Assert the real provider (not the stub) and its imports
+      - name: Assert the real provider (not the stand-in), with no LeapC import
         shell: pwsh
         run: |
           $dll = "_package\bin\plugins\DisplayXR-Ultraleap.dll"
           if (-not (Test-Path $dll)) { throw "no real provider DLL" }
           $deps = & dumpbin /nologo /dependents $dll
           $deps
-          if (-not ($deps -match 'LeapC\.dll')) { throw "the provider does not import LeapC.dll - is this a stub build?" }
+          if ($deps -match '(?i)LeapC') { throw "the provider must not import LeapC.dll" }
+          if (Get-ChildItem _package -Recurse -Include LeapC.dll,*STUBCHECK*) { throw "LeapC.dll or a stand-in artifact is in the package tree" }
       - uses: actions/upload-artifact@v4
         with:
           name: DisplayXR-Ultraleap-unsigned

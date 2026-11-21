@@ -4,7 +4,9 @@
 # Tag-triggered release: vX.Y.Z -> DisplayXRUltraleapSetup-X.Y.Z.<run>.exe on
 # the GitHub Release.
 #
-# The release CANNOT be built on a hosted runner: it needs the Ultraleap SDK.
+# Windows only: it is the one supported platform. The release CANNOT be built on
+# a hosted runner: it needs the Ultraleap SDK's LeapC.h (the header only - LeapC
+# is bound at run time, and nothing of Ultraleap's is packaged).
 # It runs on the same self-hosted runner as build.yml's SDK tier
 # ([self-hosted, windows, ultraleap-sdk]). If no such runner is online the job
 # stays queued - check the runner before tagging.
@@ -20,7 +22,7 @@
 #     scripts/sign-release.sh, or from a repository VARIABLE of the same name by
 #     the optional `sign` job below. Unset = the release ships unsigned;
 #   - signing never gates publishing.
-# The provider's runner needs the Ultraleap SDK too (it rebuilds the DLL).
+# The provider's runner needs the Ultraleap SDK header too (it rebuilds the DLL).
 #
 # VERSIONS: the `bump` job tells displayxr-runtime's versions-bump.yml about the
 # release. It is gated on the repository variable DXR_VERSIONS_BUMP, because the
@@ -64,6 +66,11 @@ jobs:
           Set-Content -Path CMakeLists.txt -Value $out -Encoding UTF8
           python -I scripts/check_catalog.py catalog/ultraleap-hands.json --runtime-pin $pin --version $ver
           if ($LASTEXITCODE -ne 0) { throw "catalog manifest does not match this release" }
+          # The range the installer and the catalog advertise must be true today.
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/DisplayXR/displayxr-runtime.git rt-tags
+          $c = Get-Content catalog/ultraleap-hands.json -Raw | ConvertFrom-Json
+          python -I scripts/runtime_range.py --runtime rt-tags --pin $pin --range $c.runtime_range.min $c.runtime_range.verified_max
+          if ($LASTEXITCODE -eq 1 -or $LASTEXITCODE -eq 2) { throw "the catalog's runtime range is not verified" }
       - name: Checkout displayxr-runtime (pinned)
         uses: actions/checkout@v4
         with:
@@ -85,8 +92,8 @@ jobs:
         shell: pwsh
         run: |
           $deps = & dumpbin /nologo /dependents _package\bin\plugins\DisplayXR-Ultraleap.dll
-          if (-not ($deps -match 'LeapC\.dll')) { throw "the provider does not import LeapC.dll" }
-          if (Get-ChildItem _package -Filter '*STUBCHECK*' -Recurse) { throw "a stub artifact is in the package tree" }
+          if ($deps -match '(?i)LeapC') { throw "the provider must not import LeapC.dll - it is bound at run time" }
+          if (Get-ChildItem _package -Recurse -Include LeapC.dll,*STUBCHECK*) { throw "LeapC.dll or a stand-in artifact is in the package tree" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
@@ -111,8 +118,8 @@ jobs:
           fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
-            **Unsigned CI build** unless replaced by the signing lane. Built for DisplayXR Runtime ${{ env.RUNTIME_REF }} exactly.
-            Requires the Ultraleap tracking software (not included).
+            **Unsigned CI build** unless replaced by the signing lane. Windows only. Built at DisplayXR Runtime ${{ env.RUNTIME_REF }}; the verified runtime range is in `ultraleap-hands.catalog.json`.
+            Requires the Ultraleap tracking software (not included; the provider finds it at run time).
 
   sign:
     name: signed installer (optional)
