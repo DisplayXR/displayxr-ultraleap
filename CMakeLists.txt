@@ -69,6 +69,12 @@ set(DXR_RUNTIME_SOURCE_DIR "" CACHE PATH
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(XRT_FEATURE_DEBUG_GUI OFF CACHE BOOL "" FORCE)
 set(XRT_FEATURE_WINDOW_PEEK OFF CACHE BOOL "" FORCE)
+# NOTE on cJSON: aux_util (linked statically into the provider) uses the
+# SYSTEM cJSON when the runtime tree finds one (XRT_HAVE_SYSTEM_CJSON), which
+# leaves the provider with a load dependency on a cJSON shared library. This
+# project does not override that choice: on macOS, forcing it OFF fails to
+# compile the runtime's bundled copy at v2.69.3 when Homebrew's cjson headers
+# are also on the include path (docs/trunk-dependencies.md, "cJSON").
 
 if(DXR_RUNTIME_SOURCE_DIR)
     get_filename_component(_dxr_rt "${DXR_RUNTIME_SOURCE_DIR}" ABSOLUTE)

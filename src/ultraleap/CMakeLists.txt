@@ -72,6 +72,19 @@ set_target_properties(displayxr_ultraleap PROPERTIES
 if(APPLE)
     target_link_options(displayxr_ultraleap PRIVATE
         "LINKER:-exported_symbol,_xrtInputPluginNegotiate")
+    # macOS: the provider imports u_log / u_var from @rpath/openxr_displayxr.dylib
+    # (two-level namespace), so it must be able to FIND the runtime library when
+    # the host has not loaded it already (displayxr-cli has not).
+    #   build tree  -> the runtime library's build directory (as the trunk's
+    #                  sim_stylus / sim_tracking plug-ins do);
+    #   installed   -> @loader_path/../.. : the runtime's own layout, plug-ins in
+    #                  <lib>/displayxr/plugins and the runtime library in <lib>.
+    # An install OUTSIDE the runtime's prefix needs its own rpath - see
+    # docs/packaging.md (macOS is not a shipped platform yet).
+    set_property(TARGET displayxr_ultraleap APPEND PROPERTY
+        BUILD_RPATH "$<TARGET_FILE_DIR:${RUNTIME_TARGET}>")
+    set_property(TARGET displayxr_ultraleap APPEND PROPERTY
+        INSTALL_RPATH "@loader_path/../..")
 elseif(NOT WIN32)
     target_link_options(displayxr_ultraleap PRIVATE
         "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/input_plugin_exports.version"
