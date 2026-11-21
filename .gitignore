@@ -1,0 +1,9 @@
+build*/
+_package/
+dist/
+out/
+.DS_Store
+*.user
+.vscode/
+.cache/
+compile_commands.json
