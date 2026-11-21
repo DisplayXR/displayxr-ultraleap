@@ -1,0 +1,96 @@
+{
+ "_draft": [
+  "DRAFT component entry for the DisplayXR component catalog (runtime docs/specs/runtime/component-catalog.md).",
+  "NOT published anywhere. Schema 1 of the catalog cannot express this entry: the fields listed under",
+  "_not_in_schema_1 are proposals. In particular a schema-1 client only understands requires.runtime as a",
+  "floor ('>=X.Y.Z') and would offer this component on ANY newer runtime - which is exactly what the exact",
+  "pin forbids (runtime ADR-063). Do not merge this into catalog/v1/stable.json until the client (dxr-get)",
+  "honours runtime_range.max and prerequisites.",
+  "Values marked TO-VERIFY were written without the hardware or a Windows box and must be confirmed.",
+  "size / sha256 / urls / signer are filled by the catalog generator from the published release, never by hand."
+ ],
+ "_not_in_schema_1": ["kind=input_provider", "id", "abi", "runtime_range", "prerequisites", "notes", "detect[].kind=usb", "linux", "macos"],
+
+ "component": "ultraleap",
+ "title": "Ultraleap hands",
+ "summary": "Hand tracking from an Ultraleap / Leap Motion camera as OpenXR controllers and XR_EXT_hand_tracking joints.",
+ "kind": "input_provider",
+ "id": "ultraleap",
+ "source_repo": "DisplayXR/displayxr-ultraleap",
+ "recommended": "0.1.0",
+ "optional": true,
+
+ "abi": {
+  "xrt_input_plugin": { "min": 1, "max": 1 },
+  "provider_device": "unversioned (raw struct xrt_device, runtime ADR-063) - the reason for the exact runtime range"
+ },
+
+ "requires": { "runtime": ">=2.69.3" },
+ "runtime_range": {
+  "min": "2.69.3",
+  "max": "2.69.3",
+  "rule": "exact: min == max == the DXR_RUNTIME_GIT_TAG the binary was built at, until runtime ADR-063 lands (then: min = build pin, max = last runtime of the same input ABI major)"
+ },
+
+ "prerequisites": [
+  {
+   "id": "ultraleap-tracking",
+   "title": "Ultraleap tracking software (Gemini / Hyperion) - tracking service + LeapC",
+   "kind": "external",
+   "installed_by": "the user, from Ultraleap; never fetched or redistributed by DisplayXR",
+   "url": "https://www.ultraleap.com/downloads/",
+   "detect": {
+    "windows": [
+     { "kind": "file_exists", "path": "%ProgramFiles%\\Ultraleap\\LeapSDK\\lib\\x64\\LeapC.dll", "confidence": "high", "note": "TO-VERIFY: default SDK location of the current Ultraleap installer; the installer's /LEAPC=copy source" },
+     { "kind": "service_exists", "name": "UltraleapTracking", "confidence": "low", "note": "TO-VERIFY: service name on the test box" }
+    ],
+    "linux": [
+     { "kind": "library_resolves", "name": "libLeapC.so", "confidence": "low", "note": "TO-VERIFY: package name and library path of the Ultraleap Linux package" }
+    ]
+   },
+   "when_missing": "The provider stays registered but cannot load (LeapC missing): the runtime logs the load failure and keeps its keyboard/mouse controllers. Install the Ultraleap software, then re-run the provider installer."
+  }
+ ],
+
+ "detect": [
+  { "kind": "usb", "vid": "f182", "pid": "0003", "confidence": "low", "note": "TO-VERIFY: Leap Motion Controller USB id. Purpose: offer the component when the camera is attached; never install unattended on a low-confidence match." },
+  { "kind": "file_exists", "path": "%ProgramFiles%\\Ultraleap\\LeapSDK\\lib\\x64\\LeapC.dll", "confidence": "low", "note": "TO-VERIFY: the tracking software is installed, so the user probably owns a camera" }
+ ],
+
+ "notes": [
+  {
+   "id": "ultraleap-openxr-layer",
+   "severity": "warning",
+   "title": "Disable Ultraleap's implicit OpenXR layer for desk use",
+   "text": "The Ultraleap installer registers XR_APILAYER_ULTRALEAP_hand_tracking as an implicit OpenXR API layer. The loader puts it in every OpenXR app, whichever runtime is active, and each load resets the tracking service to Head-mounted mode: with the camera on the desk the hands come back left/right swapped and sideways motion reads as depth. Set DISABLE_XR_APILAYER_ULTRALEAP_HAND_TRACKING_1=1 in the user environment, close every OpenXR app, then select Desktop mode again in the Ultraleap Control Panel.",
+   "detect": { "kind": "openxr_implicit_layer_active", "name": "XR_APILAYER_ULTRALEAP_hand_tracking", "disable_env": "DISABLE_XR_APILAYER_ULTRALEAP_HAND_TRACKING_1" },
+   "action": "advise only - never change the layer's registration or the environment on the user's behalf"
+  },
+  {
+   "id": "leapc-not-bundled",
+   "severity": "info",
+   "title": "LeapC.dll is not shipped",
+   "text": "The Windows installer copies LeapC.dll from the user's own Ultraleap install next to the provider (so another LeapC.dll on PATH cannot shadow it). After updating the Ultraleap software, re-run the provider installer to refresh that copy."
+  }
+ ],
+
+ "windows": {
+  "version": "0.1.0",
+  "file": "DisplayXRUltraleapSetup-0.1.0.<build>.exe",
+  "args": ["/S"],
+  "registry_version": "HKLM\\Software\\DisplayXR\\Plugins\\Ultraleap\\Version",
+  "registry_runtime_pin": "HKLM\\Software\\DisplayXR\\Plugins\\Ultraleap\\RuntimePin",
+  "registration": "HKLM\\Software\\DisplayXR\\InputProviders\\ultraleap (ProbeOrder 50)",
+  "exit_codes": { "0": "ok", "3": "installed runtime is not the pinned release (pass /FORCE to override)" },
+  "status": "installer script compiles; never built with the real SDK, never run"
+ },
+ "linux": {
+  "version": "0.1.0",
+  "file": "displayxr-ultraleap-0.1.0-linux-x86_64.tar.gz",
+  "manifest": "050-ultraleap-input-provider.json",
+  "status": "packaging script written; never built with the real SDK, no release lane yet"
+ },
+ "macos": {
+  "status": "not shipped: no macOS LeapC SDK was available; compile-checked against a stub only"
+ }
+}
