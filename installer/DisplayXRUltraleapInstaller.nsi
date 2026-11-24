@@ -130,6 +130,7 @@ AllowSkipFiles off
 
 Var ServiceWasRunning
 Var Force          ; "1" when /FORCE was given
+Var LayerChoice    ; /LAYER=off | keep, "" = decide (ask; silent: off when DisplayXR is the active runtime)
 
 ;--------------------------------
 ; Restart Manager: ask whoever maps our DLL (displayxr-service.exe, an
@@ -204,12 +205,18 @@ FunctionEnd
 !macroend
 
 ;--------------------------------
-; Ultraleap's implicit OpenXR layer. ADVISORY ONLY: the installer reads the
-; registration and says what to do; it never changes the layer's registration
-; or anybody's environment. $R9 = 1 when an enabled registration was found.
+; Ultraleap's implicit OpenXR layer (#9). The OpenXR loader puts it into every
+; OpenXR app, and once such an app creates a hand tracker it switches the
+; Ultraleap tracking service to Head-mounted and keeps it there (it switches
+; back within ~1 s of any change). With a Leap on the desk that swaps the
+; hands, and the provider cannot win that fight. So: offer to turn the layer
+; off (its HKLM implicit-layer DWORD = 1), record exactly what was changed,
+; and undo it on uninstall. /LAYER=off | keep decides without asking; a
+; silent install without /LAYER turns it off only when DisplayXR is the
+; machine's active OpenXR runtime. The value name is the layer manifest path.
 
 Function UlCheckImplicitLayer
-	StrCpy $R9 0
+	StrCpy $R9 ""
 	StrCpy $R0 0
 	layer_loop:
 		ClearErrors
@@ -224,19 +231,49 @@ Function UlCheckImplicitLayer
 		${IfNot} ${Errors}
 			ReadRegDWORD $R3 HKLM "${LAYER_KEY}" "$R1"
 			${If} $R3 == 0
-				StrCpy $R9 1
-				DetailPrint "NOTE: Ultraleap's implicit OpenXR layer is registered and enabled:"
-				DetailPrint "      $R1"
+				StrCpy $R9 "$R1"
 			${EndIf}
 		${EndIf}
 		Goto layer_loop
 	layer_done:
-	${If} $R9 == 1
-		DetailPrint "      For a Leap on the desk, set ${LAYER_DISABLE_ENV}=1 in the user"
-		DetailPrint "      environment, close every OpenXR app, and set Desktop mode again in the"
-		DetailPrint "      Ultraleap Control Panel. Otherwise the layer resets the tracking service"
-		DetailPrint "      to Head-mounted mode in every OpenXR app and the hands come back swapped."
-		MessageBox MB_ICONINFORMATION|MB_OK "Ultraleap's own OpenXR layer is enabled on this machine.$\r$\n$\r$\nIt loads into every OpenXR app and switches the Ultraleap tracking service to Head-mounted mode, which swaps left and right for a Leap on the desk.$\r$\n$\r$\nTo use the DisplayXR hands provider with a desk-mounted Leap: set the user environment variable ${LAYER_DISABLE_ENV}=1, close every OpenXR app, then select Desktop mode again in the Ultraleap Control Panel.$\r$\n$\r$\nThis installer did not change anything about that layer." /SD IDOK
+	${If} $R9 == ""
+		Return
+	${EndIf}
+	DetailPrint "Ultraleap's implicit OpenXR layer is registered and enabled:"
+	DetailPrint "  $R9"
+
+	StrCpy $R4 "$LayerChoice"
+	${If} $R4 == ""
+		${If} ${Silent}
+			; DisplayXR is the active runtime -> the DisplayXR provider is the hands source.
+			ReadRegStr $R5 HKLM "SOFTWARE\Khronos\OpenXR\1" "ActiveRuntime"
+			ClearErrors
+			${WordFind} "$R5" "DisplayXR" "E+1{" $R6
+			${If} ${Errors}
+				StrCpy $R4 "keep"
+			${Else}
+				StrCpy $R4 "off"
+			${EndIf}
+			ClearErrors
+		${Else}
+			MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON1 "Ultraleap's own OpenXR layer is turned on. It loads into every OpenXR app and switches the Ultraleap tracking service to Head-mounted mode, which swaps left and right hands for a Leap on the desk.$\r$\n$\r$\nTurn it off so the DisplayXR hands provider works? (Recommended for a Leap on the desk. Uninstalling this provider turns it back on.)" /SD IDYES IDNO layer_keep
+			StrCpy $R4 "off"
+			Goto layer_decided
+			layer_keep:
+			StrCpy $R4 "keep"
+			layer_decided:
+		${EndIf}
+	${EndIf}
+
+	${If} $R4 == "off"
+		WriteRegDWORD HKLM "${LAYER_KEY}" "$R9" 1
+		WriteRegStr HKLM "${OWN_KEY}" "DisabledUltraleapLayer" "$R9"
+		DetailPrint "Turned Ultraleap's OpenXR layer off (restored on uninstall). OpenXR apps"
+		DetailPrint "already running (for example the DisplayXR Browser) keep it until restarted."
+	${Else}
+		DetailPrint "Left Ultraleap's OpenXR layer on (/LAYER=keep, or not the active runtime)."
+		DetailPrint "For a Leap on the desk: set ${LAYER_DISABLE_ENV}=1 in the user"
+		DetailPrint "environment and restart OpenXR apps, or the hands come back swapped."
 	${EndIf}
 FunctionEnd
 
@@ -327,6 +364,20 @@ Section "Uninstall"
 	RMDir "$INSTDIR"
 	RMDir "$PROGRAMFILES64\DisplayXR\Plugins"
 
+	; #9: turn Ultraleap's layer back on if this installer turned it off and
+	; nobody has changed it since.
+	ReadRegStr $1 HKLM "${OWN_KEY}" "DisabledUltraleapLayer"
+	${If} $1 != ""
+		ClearErrors
+		ReadRegDWORD $2 HKLM "${LAYER_KEY}" "$1"
+		${IfNot} ${Errors}
+		${AndIf} $2 == 1
+			WriteRegDWORD HKLM "${LAYER_KEY}" "$1" 0
+			DetailPrint "Turned Ultraleap's OpenXR layer back on."
+		${EndIf}
+		ClearErrors
+	${EndIf}
+
 	; Our allowlist row, and only ours.
 	!insertmacro ULTRALEAP_ALLOWLIST_REMOVE
 	ReadRegStr $1 HKLM "${OWN_KEY}" "AllowlistDigest"
@@ -356,6 +407,16 @@ Function .onInit
 	${GetOptions} $R0 "/FORCE" $R1
 	${IfNot} ${Errors}
 		StrCpy $Force "1"
+	${EndIf}
+	ClearErrors
+	; --- /LAYER=off | keep (#9) ---------------------------------------
+	StrCpy $LayerChoice ""
+	${GetOptions} $R0 "/LAYER=" $R1
+	${IfNot} ${Errors}
+		${If} $R1 == "off"
+		${OrIf} $R1 == "keep"
+			StrCpy $LayerChoice "$R1"
+		${EndIf}
 	${EndIf}
 	ClearErrors
 

@@ -111,6 +111,7 @@ Use a `displayxr-cli` from a runtime release inside the range.
 | `SETTLE_MS` | 300 | how long `xrCreateInstance` waits for a "camera attached?" answer (was `DXR_ULTRALEAP_SETTLE_MS`) |
 | `PERSIST_HUB` | 1 | keep one Leap connection for the process (was `DXR_ULTRALEAP_PERSIST_HUB`) |
 | `LEAPC_PATH` | empty | where `LeapC.dll` is, if not in the default Ultraleap location |
+| `TRACKING_MODE` | `desktop` | `desktop`: ask the Ultraleap service for Desktop mode and put it back after another app switches it; `leave`: never change it (a head-mounted Leap) |
 
 `displayxr-cli input set ultraleap <KEY> <value>` (per user, next session), or
 `DXR_INPUT_ULTRALEAP_<KEY>` in the hosting process. The two old `DXR_ULTRALEAP_*`
@@ -130,20 +131,29 @@ if the Ultraleap software or its OpenXR layer needs attention. Details:
 Ultraleap's installer registers its own OpenXR API layer,
 `XR_APILAYER_ULTRALEAP_hand_tracking`, as an **implicit** layer. The OpenXR loader
 puts implicit layers into every OpenXR app, whichever runtime is active — DisplayXR
-apps and the DisplayXR Browser included — and each load switches the Ultraleap
-tracking service back to **Head-mounted** mode. With the camera on the desk that
-swaps left and right and turns sideways motion into depth.
+apps and the DisplayXR Browser included. Once such an app creates a hand tracker,
+the layer switches the Ultraleap tracking service to **Head-mounted** mode and
+switches it back within about a second of any change. With the camera on the desk
+that swaps left and right and turns sideways motion into depth. (Measured on a Leap
+Motion Controller 2 with Ultraleap 6.2.0: an app that only loads the layer did not
+switch it.)
 
-For desk use:
+What this repository does about it (#9):
 
-1. Set `DISABLE_XR_APILAYER_ULTRALEAP_HAND_TRACKING_1=1` in the **user** environment
-   (the layer manifest's own off switch).
-2. Close every OpenXR app that already loaded the layer, browsers included.
-3. Select Desktop mode again in the Ultraleap Control Panel.
+- **The installer offers to turn the layer off** (its HKLM implicit-layer DWORD = 1),
+  records what it changed, and turns it back on at uninstall unless someone changed
+  it since. `/LAYER=off` or `/LAYER=keep` decides without asking; a silent install
+  without `/LAYER` turns it off only when DisplayXR is the active OpenXR runtime.
+- **The provider holds Desktop** (`TRACKING_MODE=desktop`): it asks for Desktop at
+  connect, logs the mode the service reports, and puts Desktop back after a one-off
+  switch. Against the layer's immediate push-back it stops for a minute with one
+  warning instead of flapping the tracker, then retries once.
+- The provider logs the layer advice once while the layer is enabled, and
+  `displayxr-cli selftest` / `info` report `WARN: ULTRALEAP_OPENXR_LAYER`.
 
-The provider logs this once when the layer is active, `displayxr-cli selftest` /
-`info` report `WARN: ULTRALEAP_OPENXR_LAYER`, and the installer says it too. None of
-them changes the layer for you. The same layer also intercepts
+By hand, per user: set `DISABLE_XR_APILAYER_ULTRALEAP_HAND_TRACKING_1=1` in the
+**user** environment (the layer manifest's own off switch) and restart every OpenXR
+app that already loaded the layer, browsers included. The same layer also intercepts
 `XR_EXT_hand_tracking` before it reaches the runtime; see the runtime's
 `docs/getting-started/troubleshooting.md`.
 
