@@ -92,15 +92,24 @@ the first three dot-separated components).
 ## The Ultraleap implicit OpenXR layer
 
 The installer checks `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit` for an
-enabled `UltraleapHandTracking` manifest and, if it finds one, explains the desk-use
-workaround (`DISABLE_XR_APILAYER_ULTRALEAP_HAND_TRACKING_1=1`). It is advisory: the
-installer never changes the layer's registration or anyone's environment. The
-provider logs the same advice once per process (`ultraleap_layer.c`).
+enabled `UltraleapHandTracking` manifest (DWORD 0). If it finds one (#9):
 
-*To verify:* the manifest's value name on the test box (the check looks for
-`UltraleapHandTracking` in it), and whether the per-user hive needs checking too (the
-runtime's lookup reads both; the installer reads HKLM only, because an elevated
-installer's HKCU is not reliably the user's).
+- interactive: it asks whether to turn the layer off (default Yes);
+- `/LAYER=off` / `/LAYER=keep`: decided without asking;
+- `/S` without `/LAYER`: off only when `HKLM\SOFTWARE\Khronos\OpenXR\1` `ActiveRuntime`
+  names DisplayXR, otherwise kept.
+
+Off = that value's DWORD set to 1, with the value name recorded as
+`DisabledUltraleapLayer` under `HKLM\Software\DisplayXR\Plugins\Ultraleap`. The
+uninstaller sets it back to 0 only if it is still 1, so a change the user made since
+is left alone. It never touches anyone's environment. The provider still logs the
+advice once per process while the layer is enabled (`ultraleap_layer.c`).
+
+Verified on 8k-box (Ultraleap 6.2.0): the value name is
+`C:\Program Files\Ultraleap\OpenXR\UltraleapHandTracking.json`, in HKLM. *To verify:*
+whether a per-user registration ever occurs (the runtime's lookup reads both hives;
+the installer reads HKLM only, because an elevated installer's HKCU is not reliably
+the user's).
 
 ## Signing
 
