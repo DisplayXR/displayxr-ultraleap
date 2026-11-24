@@ -208,6 +208,20 @@ ul_map_joints_to_hand_frame(struct xrt_hand_joint_set *set);
 //! Upper bound of `SETTLE_MS` (it blocks xrCreateInstance).
 #define UL_HUB_MAX_SETTLE_MS 5000
 
+/*!
+ * `TRACKING_MODE`: what the provider asks of the Ultraleap tracking service.
+ * The mode is ONE per service (every LeapC client shares it), so another
+ * client — typically Ultraleap's implicit OpenXR layer in some other app —
+ * can switch it under us (#9).
+ */
+enum ul_tracking_mode_pref
+{
+	//! Ask for Desktop at connect and put it back when another client changes it (rate-limited).
+	UL_TRACKING_MODE_PREF_DESKTOP = 0,
+	//! Never touch the service's mode (a real head-mounted mount, or a user who manages it themselves).
+	UL_TRACKING_MODE_PREF_LEAVE = 1,
+};
+
 struct ul_hub_config
 {
 	//! `SETTLE_MS`: 0..UL_HUB_MAX_SETTLE_MS; 0 = do not wait.
@@ -216,6 +230,8 @@ struct ul_hub_config
 	bool persist_hub;
 	//! `LEAPC_PATH`: the LeapC library, or the directory holding it; "" = look in the default places.
 	char leapc_path[512];
+	//! `TRACKING_MODE`: desktop (default) | leave.
+	enum ul_tracking_mode_pref tracking_mode;
 };
 
 void
@@ -233,6 +249,61 @@ ul_hub_config_from_settings(xrt_component_get_setting_fn_t get_setting,
                             struct ul_hub_config *out,
                             bool *out_settle_set,
                             bool *out_persist_set);
+
+//! Parse a `TRACKING_MODE` value ("desktop" / "leave", case-insensitive); false (and @p out untouched) otherwise.
+bool
+ul_hub_parse_tracking_mode(const char *text, enum ul_tracking_mode_pref *out);
+
+/*!
+ * #9: putting Desktop back. A one-off switch (an app that set Head-mounted
+ * and closed) is corrected at once. Ultraleap's implicit OpenXR layer does
+ * not switch once — while an app holding it has a hand tracker it switches
+ * back within ~1 s of every change, so re-asserting against it only flaps
+ * the tracker. A switch away that lands within UL_TRACKING_MODE_PUSHBACK_NS
+ * of our last request is that push-back: stop for UL_TRACKING_MODE_BACKOFF_NS
+ * (the caller warns once), then try once more — by then the app may be gone.
+ */
+#define UL_TRACKING_MODE_PUSHBACK_NS (5LL * 1000 * 1000 * 1000)
+#define UL_TRACKING_MODE_BACKOFF_NS (60LL * 1000 * 1000 * 1000)
+
+//! Re-assert bookkeeping for the functions below. Zero-init.
+struct ul_tracking_mode_guard
+{
+	//! When we last asked for Desktop, 0 = never.
+	int64_t last_reassert_ns;
+	//! No re-assert before this time (after a push-back), 0 = none.
+	int64_t backoff_until_ns;
+	//! A push-back stopped us; true until the next successful re-assert.
+	bool gave_up;
+};
+
+/*!
+ * The service reported @p service_mode (an eLeapTrackingMode value). Should
+ * the provider set Desktop again now? Pure (testable without LeapC). False
+ * for TRACKING_MODE=leave, for Desktop / Unknown, while backing off, and on
+ * a push-back (which starts the back-off and sets @p guard->gave_up).
+ */
+bool
+ul_tracking_mode_should_reassert(struct ul_tracking_mode_guard *guard,
+                                 enum ul_tracking_mode_pref pref,
+                                 int service_mode,
+                                 int64_t now_ns);
+
+/*!
+ * A back-off has run out and the service is still not in Desktop: time for
+ * the one retry (the caller then asks @ref ul_tracking_mode_should_reassert).
+ * Needed because a mode left behind by an app that has closed raises no
+ * further event.
+ */
+bool
+ul_tracking_mode_retry_due(const struct ul_tracking_mode_guard *guard,
+                           enum ul_tracking_mode_pref pref,
+                           int service_mode,
+                           int64_t now_ns);
+
+//! "desktop" / "hmd" / "screentop" / "unknown" for an eLeapTrackingMode value.
+const char *
+ul_tracking_mode_str(int service_mode);
 
 //! Parse a `SETTLE_MS` value; false (and @p out untouched) when out of range or not a number.
 bool

@@ -45,6 +45,10 @@ static const struct xrt_component_setting_desc g_descs[] = {
     {"LEAPC_PATH", XRT_COMPONENT_SETTING_TYPE_STRING, "",
      "absolute path of the Ultraleap LeapC library, or of the directory holding it; empty = the default Ultraleap "
      "install location"},
+    {"TRACKING_MODE", XRT_COMPONENT_SETTING_TYPE_ENUM, "desktop",
+     "desktop | leave. desktop: ask the Ultraleap service for Desktop mode (Leap on the desk, facing up) and put it "
+     "back when another app switches it (Ultraleap's own OpenXR layer sets Head-mounted, which swaps the hands); "
+     "leave: never change the service's mode"},
 };
 
 uint32_t
@@ -155,6 +159,81 @@ ul_hub_config_defaults(struct ul_hub_config *out)
 	out->settle_ms = UL_HUB_DEFAULT_SETTLE_MS;
 	out->persist_hub = true;
 	out->leapc_path[0] = '\0';
+	out->tracking_mode = UL_TRACKING_MODE_PREF_DESKTOP;
+}
+
+bool
+ul_hub_parse_tracking_mode(const char *text, enum ul_tracking_mode_pref *out)
+{
+	if (text == NULL) {
+		return false;
+	}
+	if (ieq(text, "desktop")) {
+		*out = UL_TRACKING_MODE_PREF_DESKTOP;
+		return true;
+	}
+	if (ieq(text, "leave")) {
+		*out = UL_TRACKING_MODE_PREF_LEAVE;
+		return true;
+	}
+	return false;
+}
+
+// eLeapTrackingMode values (LeapC.h), restated so this file stays LeapC-free.
+#define UL_LEAP_MODE_DESKTOP 0
+#define UL_LEAP_MODE_HMD 1
+#define UL_LEAP_MODE_SCREENTOP 2
+
+const char *
+ul_tracking_mode_str(int service_mode)
+{
+	switch (service_mode) {
+	case UL_LEAP_MODE_DESKTOP: return "desktop";
+	case UL_LEAP_MODE_HMD: return "hmd";
+	case UL_LEAP_MODE_SCREENTOP: return "screentop";
+	default: return "unknown";
+	}
+}
+
+static bool
+mode_needs_correction(int service_mode)
+{
+	return service_mode == UL_LEAP_MODE_HMD || service_mode == UL_LEAP_MODE_SCREENTOP;
+}
+
+bool
+ul_tracking_mode_should_reassert(struct ul_tracking_mode_guard *guard,
+                                 enum ul_tracking_mode_pref pref,
+                                 int service_mode,
+                                 int64_t now_ns)
+{
+	if (pref != UL_TRACKING_MODE_PREF_DESKTOP || !mode_needs_correction(service_mode)) {
+		return false; // leave, or Desktop already / unknown: nothing to correct.
+	}
+	if (guard->backoff_until_ns != 0 && now_ns < guard->backoff_until_ns) {
+		return false;
+	}
+	if (guard->last_reassert_ns != 0 && now_ns - guard->last_reassert_ns < UL_TRACKING_MODE_PUSHBACK_NS) {
+		// Switched away again right after our request: someone is
+		// re-asserting against us. Stop instead of flapping.
+		guard->gave_up = true;
+		guard->backoff_until_ns = now_ns + UL_TRACKING_MODE_BACKOFF_NS;
+		return false;
+	}
+	guard->last_reassert_ns = now_ns;
+	guard->backoff_until_ns = 0;
+	guard->gave_up = false;
+	return true;
+}
+
+bool
+ul_tracking_mode_retry_due(const struct ul_tracking_mode_guard *guard,
+                           enum ul_tracking_mode_pref pref,
+                           int service_mode,
+                           int64_t now_ns)
+{
+	return pref == UL_TRACKING_MODE_PREF_DESKTOP && mode_needs_correction(service_mode) && guard->gave_up &&
+	       now_ns >= guard->backoff_until_ns;
 }
 
 bool
@@ -220,6 +299,9 @@ ul_hub_config_from_settings(xrt_component_get_setting_fn_t get_setting,
 	char path[sizeof(out->leapc_path)];
 	if (read_key(get_setting, "LEAPC_PATH", path, sizeof(path))) {
 		snprintf(out->leapc_path, sizeof(out->leapc_path), "%s", path);
+	}
+	if (read_key(get_setting, "TRACKING_MODE", v, sizeof(v))) {
+		(void)ul_hub_parse_tracking_mode(v, &out->tracking_mode);
 	}
 }
 

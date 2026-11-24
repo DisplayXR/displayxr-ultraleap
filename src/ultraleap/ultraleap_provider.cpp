@@ -258,6 +258,19 @@ struct ul_hub
 	 */
 	bool eager_reconnect;
 
+	/*!
+	 * #9: the `TRACKING_MODE` setting, the last mode the service reported
+	 * (an eLeapTrackingMode value, -1 = none yet) and the re-assert guard.
+	 * The service has ONE mode for all its clients, so another app (Ultraleap's
+	 * implicit OpenXR layer sets Head-mounted) can switch it under us; with
+	 * the Leap on the desk that swaps the hands. Poll-thread-owned, except
+	 * tracking_mode which create_devices refreshes under the hub lock.
+	 */
+	enum ul_tracking_mode_pref tracking_mode;
+	int service_tracking_mode;
+	struct ul_tracking_mode_guard tracking_mode_guard;
+	bool tracking_mode_gave_up_logged;
+
 	//! Every live device across every XrInstance sharing this hub.
 	//! Guarded by mutex; a NULL slot is free.
 	struct ul_device *devices[UL_MAX_DEVICES];
@@ -574,7 +587,16 @@ ul_open_connection(struct ul_hub *hub)
 	if (hub->leap->OpenConnection(hub->connection) != eLeapRS_Success) {
 		return false;
 	}
-	hub->leap->SetTrackingMode(hub->connection, eLeapTrackingMode_Desktop);
+	hub->service_tracking_mode = -1;
+	if (hub->tracking_mode == UL_TRACKING_MODE_PREF_DESKTOP) {
+		// #9: the service has one mode for every client; ask for Desktop
+		// (Leap on the desk). The answer arrives as a TrackingMode event.
+		const eLeapRS rs = hub->leap->SetTrackingMode(hub->connection, eLeapTrackingMode_Desktop);
+		if (rs != eLeapRS_Success) {
+			U_LOG_W("ultraleap: asking the tracking service for Desktop mode failed (%s).",
+			        leap_result_to_string(rs));
+		}
+	}
 	hub->connect_started_ns = (int64_t)os_monotonic_get_ns();
 	return true;
 }
@@ -594,6 +616,72 @@ ul_set_all_untracked(struct ul_hub *hub)
 		}
 	}
 	os_mutex_unlock(&hub->mutex);
+}
+
+/*!
+ * #9: the service reported its tracking mode (after our request, after
+ * another client changed it, or on connect). Log every change with the real
+ * value; with TRACKING_MODE=desktop put Desktop back when someone moved it.
+ * If it is switched away again right after our request, that is Ultraleap's
+ * implicit layer pushing back: stop for a minute and warn once instead of
+ * flapping the tracker (ul_tracking_mode_should_reassert, ultraleap_map.h).
+ */
+static void
+ul_handle_tracking_mode_event(struct ul_hub *hub, const LEAP_TRACKING_MODE_EVENT *ev)
+{
+	if (ev == NULL) {
+		return;
+	}
+	const int mode = (int)ev->current_tracking_mode;
+	if (mode != hub->service_tracking_mode) {
+		U_LOG_W("ultraleap: tracking service mode is %s%s.", ul_tracking_mode_str(mode),
+		        hub->tracking_mode == UL_TRACKING_MODE_PREF_LEAVE ? " (TRACKING_MODE=leave: not changed)" : "");
+		hub->service_tracking_mode = mode;
+	}
+	const int64_t now = (int64_t)os_monotonic_get_ns();
+	if (ul_tracking_mode_should_reassert(&hub->tracking_mode_guard, hub->tracking_mode, mode, now)) {
+		U_LOG_W(
+		    "ultraleap: another app switched the tracking service to %s (Ultraleap's own OpenXR layer does "
+		    "this; with the Leap on the desk it swaps the hands) - setting Desktop again.",
+		    ul_tracking_mode_str(mode));
+		const eLeapRS rs = hub->leap->SetTrackingMode(hub->connection, eLeapTrackingMode_Desktop);
+		if (rs != eLeapRS_Success) {
+			U_LOG_W("ultraleap: setting Desktop mode failed (%s).", leap_result_to_string(rs));
+		}
+		hub->tracking_mode_gave_up_logged = false;
+	} else if (hub->tracking_mode_guard.gave_up && !hub->tracking_mode_gave_up_logged) {
+		U_LOG_W(
+		    "ultraleap: another app switched the tracking service straight back to %s - not fighting it "
+		    "(that would flicker the tracker); one retry a minute. Most likely Ultraleap's implicit OpenXR layer in another OpenXR app: set "
+		    "DISABLE_XR_APILAYER_ULTRALEAP_HAND_TRACKING_1=1 in the user environment and restart that app, or "
+		    "set TRACKING_MODE=leave if the Leap really is head-mounted.",
+		    ul_tracking_mode_str(mode));
+		hub->tracking_mode_gave_up_logged = true;
+	}
+}
+
+//! #9: a back-off ran out and the service is still not in Desktop (a mode
+//! left behind raises no event): try once more. Poll-thread only.
+static void
+ul_retry_tracking_mode(struct ul_hub *hub)
+{
+	if (!hub->leap_connected) {
+		return;
+	}
+	const int64_t now = (int64_t)os_monotonic_get_ns();
+	if (!ul_tracking_mode_retry_due(&hub->tracking_mode_guard, hub->tracking_mode, hub->service_tracking_mode,
+	                                now) ||
+	    !ul_tracking_mode_should_reassert(&hub->tracking_mode_guard, hub->tracking_mode,
+	                                      hub->service_tracking_mode, now)) {
+		return;
+	}
+	U_LOG_W("ultraleap: tracking service still in %s - retrying Desktop.",
+	        ul_tracking_mode_str(hub->service_tracking_mode));
+	const eLeapRS rs = hub->leap->SetTrackingMode(hub->connection, eLeapTrackingMode_Desktop);
+	if (rs != eLeapRS_Success) {
+		U_LOG_W("ultraleap: setting Desktop mode failed (%s).", leap_result_to_string(rs));
+	}
+	hub->tracking_mode_gave_up_logged = false;
 }
 
 /*!
@@ -723,7 +811,9 @@ ul_poll_thread(void *ptr)
 		return NULL;
 	}
 	hub->leap_connected = true;
-	U_LOG_W("ultraleap: connection open (desktop tracking mode); hands appear when the device sees them.");
+	U_LOG_W("ultraleap: connection open (%s); hands appear when the device sees them.",
+	        hub->tracking_mode == UL_TRACKING_MODE_PREF_DESKTOP ? "asked the service for Desktop tracking mode"
+	                                                            : "TRACKING_MODE=leave: service mode not changed");
 
 	while (os_thread_helper_is_running(&hub->oth)) {
 		os_mutex_lock(&hub->mutex);
@@ -845,6 +935,8 @@ ul_poll_thread(void *ptr)
 			continue;
 		}
 
+		ul_retry_tracking_mode(hub);
+
 		LEAP_CONNECTION_MESSAGE msg;
 		eLeapRS result = hub->leap->PollConnection(hub->connection, 500 /* ms */, &msg);
 		if (result == eLeapRS_Timeout) {
@@ -859,6 +951,8 @@ ul_poll_thread(void *ptr)
 		}
 		if (msg.type == eLeapEventType_Tracking) {
 			ul_handle_tracking_event(hub, msg.tracking_event, (int64_t)os_monotonic_get_ns());
+		} else if (msg.type == eLeapEventType_TrackingMode) {
+			ul_handle_tracking_mode_event(hub, msg.tracking_mode_event);
 		} else {
 			ul_handle_presence_event(hub, &msg);
 		}
@@ -996,6 +1090,8 @@ ul_hub_create(const struct ul_map_config *map_cfg,
 	// the first role arbitration - no settle wait needed), and its poll
 	// thread keeps looking.
 	snprintf(hub->leapc_path, sizeof(hub->leapc_path), "%s", hub_cfg->leapc_path);
+	hub->tracking_mode = hub_cfg->tracking_mode;
+	hub->service_tracking_mode = -1;
 	if (!ul_hub_ensure_connection(hub, true)) {
 		hub->presence = XRT_INPUT_PROVIDER_PRESENCE_ABSENT;
 		g_ul_presence = (int)XRT_INPUT_PROVIDER_PRESENCE_ABSENT;
@@ -1337,6 +1433,8 @@ ul_create_devices(const struct ul_map_config *map_cfg,
 		hub->map_physical = map_cfg->mode == UL_MAPPING_PHYSICAL;
 		hub->display_height_m = display_height_m;
 		ul_hub_resolve_map(hub);
+		// Read by the poll thread at the next connect and mode event (#9).
+		hub->tracking_mode = hub_cfg->tracking_mode;
 		os_mutex_unlock(&hub->mutex);
 	}
 	{

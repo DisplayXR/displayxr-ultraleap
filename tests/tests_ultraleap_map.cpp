@@ -324,7 +324,7 @@ TEST_CASE("describe_settings declares every key with the compiled defaults", "[u
 	for (uint32_t i = 0; i < n; i++) {
 		declared[descs[i].key] = descs[i].default_value;
 	}
-	REQUIRE(declared.size() == 11);
+	REQUIRE(declared.size() == 12);
 	CHECK(declared["MAPPING"] == "relative");
 	CHECK(std::stof(declared["ANCHOR_X_H"]) == UL_MAP_DEFAULT_ANCHOR_X_H);
 	CHECK(std::stof(declared["ANCHOR_Y_H"]) == UL_MAP_DEFAULT_ANCHOR_Y_H);
@@ -336,6 +336,7 @@ TEST_CASE("describe_settings declares every key with the compiled defaults", "[u
 	CHECK(std::stoi(declared["SETTLE_MS"]) == UL_HUB_DEFAULT_SETTLE_MS);
 	CHECK(declared["PERSIST_HUB"] == "1");
 	CHECK(declared["LEAPC_PATH"].empty());
+	CHECK(declared["TRACKING_MODE"] == "desktop");
 }
 
 namespace {
@@ -546,4 +547,69 @@ TEST_CASE("hand frame: an empty (never-tracked) set is left alone", "[ultraleap_
 		CHECK(!std::isnan(p.position.x));
 	}
 	ul_map_joints_to_hand_frame(nullptr); // no crash
+}
+
+
+TEST_CASE("TRACKING_MODE: desktop by default, leave honoured, junk keeps the default (#9)", "[ultraleap_map]")
+{
+	struct ul_hub_config cfg;
+	ul_hub_config_defaults(&cfg);
+	CHECK(cfg.tracking_mode == UL_TRACKING_MODE_PREF_DESKTOP);
+
+	enum ul_tracking_mode_pref p = UL_TRACKING_MODE_PREF_DESKTOP;
+	CHECK(ul_hub_parse_tracking_mode("LEAVE", &p));
+	CHECK(p == UL_TRACKING_MODE_PREF_LEAVE);
+	CHECK(ul_hub_parse_tracking_mode("Desktop", &p));
+	CHECK(p == UL_TRACKING_MODE_PREF_DESKTOP);
+	CHECK_FALSE(ul_hub_parse_tracking_mode("hmd", &p));
+	CHECK_FALSE(ul_hub_parse_tracking_mode(nullptr, &p));
+	CHECK(p == UL_TRACKING_MODE_PREF_DESKTOP);
+
+	g_hub_settings.clear();
+	g_hub_settings["TRACKING_MODE"] = "leave";
+	ul_hub_config_from_settings(hub_get_setting, &cfg, nullptr, nullptr);
+	CHECK(cfg.tracking_mode == UL_TRACKING_MODE_PREF_LEAVE);
+	g_hub_settings["TRACKING_MODE"] = "sideways";
+	ul_hub_config_from_settings(hub_get_setting, &cfg, nullptr, nullptr);
+	CHECK(cfg.tracking_mode == UL_TRACKING_MODE_PREF_DESKTOP);
+	g_hub_settings.clear();
+}
+
+TEST_CASE("tracking mode guard: correct a one-off switch, stop on push-back, retry after the back-off (#9)",
+          "[ultraleap_map]")
+{
+	const int DESKTOP = 0, HMD = 1, SCREENTOP = 2, UNKNOWN = 3;
+	const int64_t sec = 1000LL * 1000 * 1000;
+	const auto D = UL_TRACKING_MODE_PREF_DESKTOP;
+	struct ul_tracking_mode_guard g = {};
+
+	// Nothing to do when Desktop already, unknown, or TRACKING_MODE=leave.
+	CHECK_FALSE(ul_tracking_mode_should_reassert(&g, D, DESKTOP, 1 * sec));
+	CHECK_FALSE(ul_tracking_mode_should_reassert(&g, D, UNKNOWN, 1 * sec));
+	CHECK_FALSE(ul_tracking_mode_should_reassert(&g, UL_TRACKING_MODE_PREF_LEAVE, HMD, 1 * sec));
+	CHECK(g.last_reassert_ns == 0);
+
+	// One-off switches, far apart: each is corrected.
+	CHECK(ul_tracking_mode_should_reassert(&g, D, HMD, 10 * sec));
+	CHECK(ul_tracking_mode_should_reassert(&g, D, SCREENTOP, 30 * sec));
+	CHECK_FALSE(g.gave_up);
+
+	// Switched away again 0.8 s after our request (the layer's push-back): stop, no flapping.
+	CHECK_FALSE(ul_tracking_mode_should_reassert(&g, D, HMD, 30 * sec + 800LL * 1000 * 1000));
+	CHECK(g.gave_up);
+	CHECK_FALSE(ul_tracking_mode_should_reassert(&g, D, HMD, 40 * sec));
+	CHECK_FALSE(ul_tracking_mode_retry_due(&g, D, HMD, 40 * sec));
+
+	// Back-off over, still Head-mounted (no new event): one retry is due and allowed.
+	const int64_t after = 30 * sec + 800LL * 1000 * 1000 + UL_TRACKING_MODE_BACKOFF_NS;
+	CHECK(ul_tracking_mode_retry_due(&g, D, HMD, after));
+	CHECK_FALSE(ul_tracking_mode_retry_due(&g, D, DESKTOP, after));
+	CHECK_FALSE(ul_tracking_mode_retry_due(&g, UL_TRACKING_MODE_PREF_LEAVE, HMD, after));
+	CHECK(ul_tracking_mode_should_reassert(&g, D, HMD, after));
+	CHECK_FALSE(g.gave_up);
+	CHECK_FALSE(ul_tracking_mode_retry_due(&g, D, HMD, after));
+
+	CHECK(std::string(ul_tracking_mode_str(HMD)) == "hmd");
+	CHECK(std::string(ul_tracking_mode_str(DESKTOP)) == "desktop");
+	CHECK(std::string(ul_tracking_mode_str(UNKNOWN)) == "unknown");
 }
