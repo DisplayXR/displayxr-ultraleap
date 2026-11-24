@@ -61,6 +61,7 @@ typedef enum _eLeapEventType
 	eLeapEventType_Device,
 	eLeapEventType_DeviceLost,
 	eLeapEventType_Tracking,
+	eLeapEventType_TrackingMode,
 } eLeapEventType;
 
 typedef enum _eLeapHandType
@@ -72,7 +73,9 @@ typedef enum _eLeapHandType
 typedef enum _eLeapTrackingMode
 {
 	eLeapTrackingMode_Desktop = 0,
-	eLeapTrackingMode_HMD,
+	eLeapTrackingMode_HMD = 1,
+	eLeapTrackingMode_ScreenTop = 2,
+	eLeapTrackingMode_Unknown = 3,
 } eLeapTrackingMode;
 
 typedef struct _LEAP_CONNECTION *LEAP_CONNECTION;
@@ -138,10 +141,17 @@ typedef struct _LEAP_TRACKING_EVENT
 	LEAP_HAND *pHands;
 } LEAP_TRACKING_EVENT;
 
+typedef struct _LEAP_TRACKING_MODE_EVENT
+{
+	uint32_t reserved;
+	eLeapTrackingMode current_tracking_mode;
+} LEAP_TRACKING_MODE_EVENT;
+
 typedef struct _LEAP_CONNECTION_MESSAGE
 {
 	eLeapEventType type;
 	const LEAP_TRACKING_EVENT *tracking_event;
+	const LEAP_TRACKING_MODE_EVENT *tracking_mode_event;
 } LEAP_CONNECTION_MESSAGE;
 
 eLeapRS
