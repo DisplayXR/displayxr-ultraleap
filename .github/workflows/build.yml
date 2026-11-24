@@ -90,8 +90,10 @@ jobs:
           set -uo pipefail
           lo=$(python3 -c "import json;print(json.load(open('catalog/ultraleap-hands.json'))['runtime_range']['min'])")
           hi=$(python3 -c "import json;print(json.load(open('catalog/ultraleap-hands.json'))['runtime_range']['verified_max'])")
-          python3 -I scripts/runtime_range.py --runtime rt --pin "$RUNTIME_REF" --range "$lo" "$hi"
-          rc=$?
+          # `|| rc=$?`: the runner's shell is `bash -e`, so a bare non-zero exit
+          # ended the step before the rc=3 downgrade below ever ran.
+          rc=0
+          python3 -I scripts/runtime_range.py --runtime rt --pin "$RUNTIME_REF" --range "$lo" "$hi" || rc=$?
           # 3 = the range is true but a newer runtime exists outside it. That is
           # the scheduled workflow's business (runtime-range.yml), not a reason
           # to fail a push.
