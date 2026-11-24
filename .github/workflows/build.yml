@@ -48,7 +48,7 @@ concurrency:
 
 env:
   # MUST equal DXR_RUNTIME_GIT_TAG in CMakeLists.txt (checked in `lint`).
-  RUNTIME_REF: v2.69.3
+  RUNTIME_REF: v2.70.5
 
 jobs:
   lint:
