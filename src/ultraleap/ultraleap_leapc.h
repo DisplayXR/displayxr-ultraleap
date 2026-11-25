@@ -22,6 +22,10 @@
  *   1. the `LEAPC_PATH` setting — a file, or a directory holding the library;
  *   2. the platform's default Ultraleap install locations
  *      (`ul_leapc_default_candidate`).
+ * A set `LEAPC_PATH` with no usable LeapC is not exclusive: the defaults are
+ * still tried, so a stale setting never breaks hands on a box that has the
+ * software, and the success detail then names the setting and why it was
+ * passed over (#10).
  *
  * @ingroup drv_ultraleap
  */

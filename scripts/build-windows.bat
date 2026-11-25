@@ -22,10 +22,14 @@ setlocal enabledelayedexpansion
 ::                            unset, the sibling ..\displayxr-runtime is used.
 ::                            IT MUST BE AT THE TAG PINNED IN CMakeLists.txt
 ::                            (DXR_RUNTIME_GIT_TAG) for anything you ship; CMake
-::                            warns when it is not. Without a local checkout,
-::                            CMake fetches the pinned tag, and you must supply
-::                            the runtime's build dependencies yourself (vcpkg
-::                            toolchain, OpenXR loader) - see .github\workflows.
+::                            warns when it is not. REQUIRED, with vcpkg\ in it:
+::                            the script stops if there is none (#11).
+::   DXR_ALLOW_FETCH_RUNTIME - 1 = build with no local checkout: CMake fetches the
+::                            pinned tag, and you supply the runtime's build
+::                            dependencies yourself (vcpkg toolchain, OpenXR
+::                            loader) - see .github\workflows\build.yml.
+:: Keep the checkout at a short path (C:\dxr-ul): deep paths pass MAX_PATH under
+:: build\_deps\ and the script warns above 80 characters.
 ::   SIGN_CMD               - code-signing command; empty = unsigned build.
 ::   BUILD_NUM              - fourth version component of the installer name.
 ::
@@ -40,14 +44,53 @@ if "%TARGET%"=="" set TARGET=all
 set CONFIG=%~2
 if "%CONFIG%"=="" set CONFIG=Release
 
+:: A deep repo path breaks the build late: CMake's FetchContent / ExternalProject
+:: stamp files under build\_deps\ exceed MAX_PATH (260) and ninja stops with
+:: "Filename longer than 260 characters" (#11). Say so before any work is done.
+for %%I in ("%REPO%.") do set "REPO_ABS=%%~fI"
+set REPO_LEN=0
+for /l %%n in (0,1,400) do if not "!REPO_ABS:~%%n,1!"=="" set /a REPO_LEN=%%n+1
+if !REPO_LEN! GTR 80 (
+    echo.
+    echo WARNING: this checkout's path is !REPO_LEN! characters long:
+    echo   !REPO_ABS!
+    echo   Paths under build\_deps\ can then pass the 260-character limit and ninja fails
+    echo   with "Filename longer than 260 characters". Clone to a short path such as
+    echo   C:\dxr-ul if the build stops there.
+    echo.
+)
+
 if "%DXR_RUNTIME_SOURCE_DIR%"=="" (
     if exist "%REPO%..\displayxr-runtime\CMakeLists.txt" (
         set DXR_RUNTIME_SOURCE_DIR=%REPO%..\displayxr-runtime
         echo Detected local runtime at !DXR_RUNTIME_SOURCE_DIR!
-    ) else (
-        echo No local runtime checkout: CMake will fetch the pinned tag.
     )
 )
+
+:: Without a local runtime checkout CMake fetches the pinned tag, but nothing on
+:: that route supplies the runtime's vcpkg dependencies, so configure fails deep in
+:: the runtime's CMakeLists.txt ("Could not find ... Eigen3", #11). Refuse up front
+:: unless the caller says they provide the dependencies themselves.
+if not "%DXR_ALLOW_FETCH_RUNTIME%"=="1" (
+    set "RT_OK="
+    if not "%DXR_RUNTIME_SOURCE_DIR%"=="" if exist "%DXR_RUNTIME_SOURCE_DIR%\vcpkg\scripts\buildsystems\vcpkg.cmake" set RT_OK=1
+    if not defined RT_OK (
+        echo.
+        if "%DXR_RUNTIME_SOURCE_DIR%"=="" (
+            echo ERROR: no local displayxr-runtime checkout found.
+        ) else (
+            echo ERROR: %DXR_RUNTIME_SOURCE_DIR% has no vcpkg\ - it has not been built yet.
+        )
+        echo   This build compiles runtime libraries from source and needs the runtime's
+        echo   vcpkg dependencies. Clone displayxr-runtime at the pinned tag
+        echo   ^(DXR_RUNTIME_GIT_TAG in CMakeLists.txt^), build it once with its
+        echo   scripts\build_windows.bat, then set DXR_RUNTIME_SOURCE_DIR to it ^(or put it
+        echo   next to this repo as ..\displayxr-runtime^).
+        echo   Supplying the dependencies yourself? Set DXR_ALLOW_FETCH_RUNTIME=1.
+        exit /b 1
+    )
+)
+if "%DXR_RUNTIME_SOURCE_DIR%"=="" echo No local runtime checkout: CMake will fetch the pinned tag ^(DXR_ALLOW_FETCH_RUNTIME=1^).
 
 echo === Setting up MSVC environment ===
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
