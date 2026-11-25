@@ -26,7 +26,7 @@ provider that wraps a vendor SDK ([`docs/template-notes.md`](docs/template-notes
 
 To **use** it:
 
-1. A DisplayXR runtime in the verified range — currently **2.68.0 to 2.69.3**
+1. A DisplayXR runtime in the verified range — currently **2.70.7** (only)
    ([how the range is determined](docs/trunk-dependencies.md#7-the-rule); the current
    values are in [`catalog/ultraleap-hands.json`](catalog/ultraleap-hands.json)).
 2. The **Ultraleap tracking software** (Gemini / Hyperion) from Ultraleap, with its
@@ -79,7 +79,7 @@ scripts/ci-load-check.sh build-stub
 
 ### The runtime pin and range
 
-`DXR_RUNTIME_GIT_TAG` in `CMakeLists.txt` (currently `v2.69.3`) is the runtime release
+`DXR_RUNTIME_GIT_TAG` in `CMakeLists.txt` (currently `v2.70.7`) is the runtime release
 the provider is built at; `RUNTIME_REF` in the workflows repeats it and CI fails when
 they differ. A binary built there is valid on every runtime release whose shared
 headers are identical to that tag's. `scripts/runtime_range.py` computes that range
