@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
 
 env:
-  RUNTIME_REF: v2.69.3
+  RUNTIME_REF: v2.70.11
 
 jobs:
   range:
