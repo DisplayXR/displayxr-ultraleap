@@ -334,10 +334,19 @@ ul_leapc_load(const char *path_setting, char *detail, size_t detail_size)
 	why[0] = '\0';
 	enum ul_leapc_state result = UL_LEAPC_NOT_FOUND;
 
+	// Why a set LEAPC_PATH was passed over, so a load from a default location
+	// says so instead of looking as if the setting had been honoured (#10).
+	const bool setting_set = path_setting != NULL && path_setting[0] != '\0';
+	char setting_skip[UL_PATH_MAX + 256];
+	setting_skip[0] = '\0';
+
 	for (int i = -1;; i++) {
 		char path[UL_PATH_MAX];
 		if (i < 0) {
 			if (!setting_candidate(path_setting, path, sizeof(path))) {
+				if (setting_set) {
+					snprintf(setting_skip, sizeof(setting_skip), "it is not an absolute path");
+				}
 				continue;
 			}
 		} else if (!ul_leapc_default_candidate((uint32_t)i, path, sizeof(path))) {
@@ -353,8 +362,22 @@ ul_leapc_load(const char *path_setting, char *detail, size_t detail_size)
 		enum ul_leapc_state st = try_path(path, why, sizeof(why));
 		if (st == UL_LEAPC_LOADED) {
 			g_state = UL_LEAPC_LOADED;
-			snprintf(detail, detail_size, "LeapC loaded from %s", path);
+			if (i >= 0 && setting_skip[0] != '\0') {
+				snprintf(detail, detail_size,
+				         "LeapC loaded from %s - the LEAPC_PATH setting '%s' has no usable LeapC (%s), so "
+				         "a default location was used",
+				         path, path_setting, setting_skip);
+			} else {
+				snprintf(detail, detail_size, "LeapC loaded from %s", path);
+			}
 			return g_state;
+		}
+		if (i < 0) {
+			if (st == UL_LEAPC_INCOMPATIBLE) {
+				snprintf(setting_skip, sizeof(setting_skip), "%s", why);
+			} else {
+				snprintf(setting_skip, sizeof(setting_skip), "no %s at %s", UL_LEAPC_FILE, path);
+			}
 		}
 		if (st == UL_LEAPC_INCOMPATIBLE) {
 			result = UL_LEAPC_INCOMPATIBLE; // Remember, keep looking.

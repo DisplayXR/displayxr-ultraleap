@@ -52,11 +52,19 @@ set LEAPSDK_DIR=C:\Program Files\Ultraleap\LeapSDK
 scripts\build-windows.bat all
 ```
 
-The realistic setup is a local runtime checkout **at the pinned tag** that has been
-built once with its own `scripts\build_windows.bat` (it then carries the vcpkg
-toolchain and the OpenXR loader); `build-windows.bat` picks up the sibling
-`..\displayxr-runtime` automatically. `.github/workflows/build.yml` shows the same
-build from scratch.
+On Windows a local runtime checkout **at the pinned tag** that has been built once
+with its own `scripts\build_windows.bat` is **required** (it then carries the vcpkg
+toolchain and the OpenXR loader). `build-windows.bat` picks up the sibling
+`..\displayxr-runtime` automatically, or set `DXR_RUNTIME_SOURCE_DIR`; without one
+(or without its `vcpkg\`) the script stops before configuring, because the
+fetch-the-tag route has no source for the runtime's dependencies.
+`.github/workflows/build.yml` shows the same build from scratch, supplying them
+itself (`DXR_ALLOW_FETCH_RUNTIME=1` lets the script take that route).
+
+Keep the checkout at a **short path** (e.g. `C:\dxr-ul`): CMake's stamp files under
+`build\_deps\` otherwise pass Windows' 260-character limit and ninja fails with
+`Filename longer than 260 characters`. The script warns when the path is longer than
+80 characters.
 
 Without `LeapC.h`, configure prints `Ultraleap input provider: NOT BUILT - LeapC SDK
 not found`, and only the hardware-free tests are built.

@@ -53,9 +53,13 @@ the Leia SR plug-in 2.23.4 (the LeiaSR Platform is installed, with its own
       app the SR stack also maps `LeiaSR\Platform\bin\LeapC.dll` for itself; the
       provider still binds the Ultraleap one by absolute path.*
 - [ ] `displayxr-cli input set ultraleap LEAPC_PATH <dir>` pointing at a copy in
-      another folder is honoured; pointing at a folder with no `LeapC.dll` gives the
-      not-found state. *Run 1: a copy (folder or file path) is honoured. A folder
-      without LeapC silently falls back to the default location (#10).*
+      another folder is honoured; pointing at a folder with no `LeapC.dll` falls back
+      to the default location, and the load line says so: `LeapC loaded from <default>
+      - the LEAPC_PATH setting '<dir>' has no usable LeapC (no LeapC.dll at …), so a
+      default location was used`. (The fallback is deliberate, #10: a stale setting
+      must not break hands on a box that has the software.) *Run 1: a copy (folder
+      or file path) is honoured. A folder without LeapC fell back with no line saying
+      so (#10, fixed).*
 - [ ] Not-found state for real: rename the Ultraleap folder (or test on a box
       without the software). `displayxr-cli selftest` passes, `input_providers` says
       the provider loaded with its hardware absent, the log has
