@@ -36,9 +36,9 @@
   "runtime": ">=2.70.7"
  },
  "runtime_range": {
-  "build": "2.70.7",
+  "build": "2.70.11",
   "min": "2.70.7",
-  "verified_max": "2.70.7",
+  "verified_max": "2.70.11",
   "rule": "The binary is built at `build`. It is valid on every runtime release whose shared headers (scripts/runtime_range.py: the xrt_device / xrt_input_plugin include closure plus u_logging.h and u_var.h) are byte-identical to `build`'s. `min`..`verified_max` is the contiguous run of releases for which that was checked (CI re-checks it). A runtime newer than verified_max is UNVERIFIED, not known-bad: when one is released the check is re-run; identical -> raise verified_max here (no rebuild, no new provider release); different -> repin, rebuild, release. A catalog client should offer this component only inside the range.",
   "after_adr_063": "min = build pin, no maximum inside one input ABI major"
  },
