@@ -59,7 +59,7 @@ option(ULTRALEAP_USE_LEAPC_STUB
 # VERIFIED RANGE is recorded in catalog/ultraleap-hands.json and checked in CI;
 # the installer's runtime floor derives from it (docs/trunk-dependencies.md).
 # --------------------------------------------------------------------------
-set(DXR_RUNTIME_GIT_TAG "v2.70.11" CACHE STRING
+set(DXR_RUNTIME_GIT_TAG "v2.70.12" CACHE STRING
     "displayxr-runtime release tag this provider is built against (exact pin, ADR-063).")
 set(DXR_RUNTIME_SOURCE_DIR "" CACHE PATH
     "Optional local displayxr-runtime checkout to build against instead of fetching.")
