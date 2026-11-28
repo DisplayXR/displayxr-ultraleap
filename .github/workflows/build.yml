@@ -48,7 +48,7 @@ concurrency:
 
 env:
   # MUST equal DXR_RUNTIME_GIT_TAG in CMakeLists.txt (checked in `lint`).
-  RUNTIME_REF: v2.70.7
+  RUNTIME_REF: v2.70.11
 
 jobs:
   lint:
@@ -169,7 +169,12 @@ jobs:
         run: |
           set -euo pipefail
           echo "::notice::No Ultraleap SDK on this runner: built against tests/leapc_stub. Compile, link and load only."
+          # TEMPORARY: runtime v2.70.8 .. v2.70.11 have a U_LOG_IFL call in
+          # comp_multi_weave_macos.c that newer Clang (this image) rejects as a
+          # chained comparison (-Wparentheses). Fixed in displayxr-runtime#2881;
+          # drop this flag at the first repin to a runtime release containing it.
           cmake -S . -B build-stub -G Ninja -DCMAKE_BUILD_TYPE=Release -DXRT_BUILD_DRIVER_QWERTY=ON \
+            -DCMAKE_C_FLAGS="-Wno-error=parentheses" \
             -DDXR_RUNTIME_SOURCE_DIR="$PWD/displayxr-runtime" -DULTRALEAP_USE_LEAPC_STUB=ON
           cmake --build build-stub --target displayxr_ultraleap leapc_stub tests_ultraleap_map tests_ultraleap_leapc cli drv_sim_display_plugin
       - name: Unit tests
